@@ -43,4 +43,28 @@ func main() {
 		}
 	}
 	fmt.Printf("Usage: %d input tokens, %d output tokens\n", resp.Usage.InputTokens, resp.Usage.OutputTokens)
+
+	// Streaming.
+	stream, err := model.Stream(ctx, aisdk.GenerateRequest{
+		Messages:  []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("Count from 1 to 5.")}}},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		log.Fatalf("Stream failed: %v", err)
+	}
+	fmt.Print("Stream(): ")
+	var streamErr error
+	for event := range stream {
+		switch event.Type {
+		case aisdk.StreamEventTypeTextDelta:
+			fmt.Print(event.Delta)
+		case aisdk.StreamEventTypeFinish:
+			fmt.Printf("\n[finished: %s, %d input / %d output tokens]\n", event.FinishReason, event.Usage.InputTokens, event.Usage.OutputTokens)
+		case aisdk.StreamEventTypeError:
+			streamErr = event.Err
+		}
+	}
+	if streamErr != nil {
+		log.Fatalf("stream error: %v", streamErr)
+	}
 }

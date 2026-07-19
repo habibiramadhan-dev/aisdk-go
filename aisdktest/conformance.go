@@ -34,4 +34,34 @@ func RunConformanceSuite(t *testing.T, newModel func(t *testing.T) aisdk.Model) 
 			t.Error("Generate returned no text content")
 		}
 	})
+
+	t.Run("Stream_EndsWithFinishEvent", func(t *testing.T) {
+		model := newModel(t)
+
+		stream, err := model.Stream(context.Background(), aisdk.GenerateRequest{
+			Messages:  []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("Say hello in one word.")}}},
+			MaxTokens: 64,
+		})
+		if err != nil {
+			t.Fatalf("Stream returned error: %v", err)
+		}
+
+		var sawFinish bool
+		var lastType aisdk.StreamEventType
+		for event := range stream {
+			if event.Type == aisdk.StreamEventTypeError {
+				t.Fatalf("Stream emitted an error event: %v", event.Err)
+			}
+			if event.Type == aisdk.StreamEventTypeFinish {
+				sawFinish = true
+			}
+			lastType = event.Type
+		}
+		if !sawFinish {
+			t.Error("Stream never emitted a Finish event")
+		}
+		if lastType != aisdk.StreamEventTypeFinish {
+			t.Errorf("last event type = %q, want the stream to end with Finish", lastType)
+		}
+	})
 }

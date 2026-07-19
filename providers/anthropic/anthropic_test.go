@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/habibiramadhan-dev/aisdk-go"
@@ -200,7 +201,33 @@ func TestModel_Generate_ErrorNeverLeaksAPIKey(t *testing.T) {
 
 func TestAnthropicModel_ConformanceSuite(t *testing.T) {
 	aisdktest.RunConformanceSuite(t, func(t *testing.T) aisdk.Model {
-		server := fakeAnthropicServer(t, http.StatusOK, fakeSuccessResponse)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				// Can't safely call t.Fatalf from this handler goroutine (it's not
+				// the test's own goroutine) — respond with an API-shaped error
+				// instead, so the real client call fails visibly through the
+				// conformance suite's own error checks rather than this fake
+				// silently defaulting to the non-streaming branch below.
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"type":"error","error":{"type":"api_error","message":"fake server: failed to decode request body"}}`))
+				return
+			}
+
+			if streaming, _ := body["stream"].(bool); streaming {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(fakeStreamSSE))
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(fakeSuccessResponse))
+		}))
+		t.Cleanup(server.Close)
+
 		provider := anthropicprovider.New("test-api-key", option.WithBaseURL(server.URL))
 		return provider.Model("claude-sonnet-5")
 	})
@@ -374,5 +401,101 @@ func TestModel_Stream_ReturnsReasoningDeltas(t *testing.T) {
 	}
 	if text != "Done." {
 		t.Errorf("concatenated text deltas = %q, want %q", text, "Done.")
+	}
+}
+
+const fakeStreamErrorSSE = `event: error
+data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}
+
+`
+
+func TestModel_Stream_MapsErrorEventThroughMapError(t *testing.T) {
+	server := fakeAnthropicSSEServer(t, fakeStreamErrorSSE)
+	provider := anthropicprovider.New("test-api-key", option.WithBaseURL(server.URL))
+	model := provider.Model("claude-sonnet-5")
+
+	stream, err := model.Stream(context.Background(), aisdk.GenerateRequest{
+		Messages:  []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("hi")}}},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+
+	events := collectStreamEvents(t, stream)
+
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want exactly 1 (the error event)", len(events))
+	}
+	if events[0].Type != aisdk.StreamEventTypeError {
+		t.Fatalf("events[0].Type = %q, want %q", events[0].Type, aisdk.StreamEventTypeError)
+	}
+
+	var aisdkErr *aisdk.Error
+	if !errors.As(events[0].Err, &aisdkErr) {
+		t.Fatalf("events[0].Err = %v, want it to unwrap to *aisdk.Error", events[0].Err)
+	}
+	if aisdkErr.Code != aisdk.ErrorCodeOverloaded {
+		t.Errorf("aisdkErr.Code = %q, want %q", aisdkErr.Code, aisdk.ErrorCodeOverloaded)
+	}
+	if !aisdkErr.Retryable {
+		t.Error("aisdkErr.Retryable = false, want true for overloaded_error")
+	}
+}
+
+func TestModel_Stream_StopsSendingAfterContextCancelled(t *testing.T) {
+	// A slow SSE body: pauses between events so there's a real window to
+	// cancel the context before the stream would naturally finish.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		events := []string{
+			`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"one"}}` + "\n\n",
+			`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"two"}}` + "\n\n",
+		}
+		for _, e := range events {
+			w.Write([]byte(e))
+			if flusher != nil {
+				flusher.Flush()
+			}
+			select {
+			case <-time.After(50 * time.Millisecond):
+			case <-r.Context().Done():
+				return
+			}
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	provider := anthropicprovider.New("test-api-key", option.WithBaseURL(server.URL))
+	model := provider.Model("claude-sonnet-5")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := model.Stream(ctx, aisdk.GenerateRequest{
+		Messages:  []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("hi")}}},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+
+	// Read exactly one event, then cancel instead of draining the rest.
+	<-stream
+	cancel()
+
+	// The goroutine must still close the channel promptly instead of hanging
+	// on a send nobody will ever read again. A test-level timeout proves it.
+	done := make(chan struct{})
+	go func() {
+		for range stream {
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream channel was not closed within 2s of context cancellation — goroutine leak")
 	}
 }
