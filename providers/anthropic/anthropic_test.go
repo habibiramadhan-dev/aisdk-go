@@ -312,3 +312,67 @@ func TestModel_Stream_EmitsFinishWithUsageAndReason(t *testing.T) {
 		t.Errorf("last event type = %q, want Finish to be the terminal event", events[len(events)-1].Type)
 	}
 }
+
+const fakeThinkingStreamSSE = `event: message_start
+data: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-sonnet-5","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me "}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"think..."}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Done."}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":8,"input_tokens":10}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+
+func TestModel_Stream_ReturnsReasoningDeltas(t *testing.T) {
+	server := fakeAnthropicSSEServer(t, fakeThinkingStreamSSE)
+	provider := anthropicprovider.New("test-api-key", option.WithBaseURL(server.URL))
+	model := provider.Model("claude-sonnet-5")
+
+	stream, err := model.Stream(context.Background(), aisdk.GenerateRequest{
+		Messages:  []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("hi")}}},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+
+	events := collectStreamEvents(t, stream)
+
+	var reasoning, text string
+	for _, e := range events {
+		switch e.Type {
+		case aisdk.StreamEventTypeReasoningDelta:
+			reasoning += e.Delta
+		case aisdk.StreamEventTypeTextDelta:
+			text += e.Delta
+		}
+	}
+	if reasoning != "Let me think..." {
+		t.Errorf("concatenated reasoning deltas = %q, want %q", reasoning, "Let me think...")
+	}
+	if text != "Done." {
+		t.Errorf("concatenated text deltas = %q, want %q", text, "Done.")
+	}
+}
