@@ -116,3 +116,25 @@ func mapError(err error) error {
 		Cause:     errors.New(apiErr.Error()),
 	}
 }
+
+// toStreamEvent converts a single per-delta SDK stream event into an
+// aisdk.StreamEvent. It only handles text/thinking content_block_delta —
+// tool-calling isn't implemented yet, so input_json_delta and the tool
+// name/ID carried on content_block_start are intentionally dropped here for
+// now (retrofitting tool-call streaming will need content_block_start too,
+// not just deltas). message_start/content_block_stop truly carry nothing we
+// need. message_delta/message_stop are handled statefully in Stream itself,
+// not here, since the terminal Finish event needs data from both.
+func toStreamEvent(event anthropicsdk.MessageStreamEventUnion) (aisdk.StreamEvent, bool) {
+	if event.Type != "content_block_delta" {
+		return aisdk.StreamEvent{}, false
+	}
+	switch event.Delta.Type {
+	case "text_delta":
+		return aisdk.StreamEvent{Type: aisdk.StreamEventTypeTextDelta, Delta: event.Delta.Text}, true
+	case "thinking_delta":
+		return aisdk.StreamEvent{Type: aisdk.StreamEventTypeReasoningDelta, Delta: event.Delta.Thinking}, true
+	default:
+		return aisdk.StreamEvent{}, false
+	}
+}

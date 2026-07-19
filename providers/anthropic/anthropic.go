@@ -2,7 +2,6 @@ package anthropic
 
 import (
 	"context"
-	"errors"
 
 	anthropicsdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -43,9 +42,60 @@ func (m *model) Generate(ctx context.Context, req aisdk.GenerateRequest) (aisdk.
 	return toGenerateResponse(msg), nil
 }
 
-// ErrStreamingNotImplemented is returned by Stream until Fase 2 implements it.
-var ErrStreamingNotImplemented = errors.New("aisdk/anthropic: streaming not implemented until Fase 2")
-
+// Stream's returned channel is closed once the response ends, errors, or ctx
+// is cancelled. Callers that stop ranging over the channel before it closes
+// on its own MUST cancel ctx — otherwise the background goroutine blocks
+// forever trying to send the next event to a channel nobody is reading.
 func (m *model) Stream(ctx context.Context, req aisdk.GenerateRequest) (<-chan aisdk.StreamEvent, error) {
-	return nil, ErrStreamingNotImplemented
+	params := toMessageNewParams(m.modelName, req)
+	sdkStream := m.client.Messages.NewStreaming(ctx, params)
+
+	events := make(chan aisdk.StreamEvent)
+	go func() {
+		defer close(events)
+		defer sdkStream.Close()
+
+		var finishReason aisdk.FinishReason
+		var usage aisdk.Usage
+
+		send := func(e aisdk.StreamEvent) bool {
+			select {
+			case events <- e:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+
+		for sdkStream.Next() {
+			event := sdkStream.Current()
+
+			if se, ok := toStreamEvent(event); ok {
+				if !send(se) {
+					return
+				}
+				continue
+			}
+
+			switch event.Type {
+			case "message_delta":
+				finishReason = toFinishReason(event.Delta.StopReason)
+				usage = aisdk.Usage{
+					InputTokens:  int(event.Usage.InputTokens),
+					OutputTokens: int(event.Usage.OutputTokens),
+				}
+			case "message_stop":
+				if !send(aisdk.StreamEvent{Type: aisdk.StreamEventTypeFinish, FinishReason: finishReason, Usage: usage}) {
+					return
+				}
+			}
+		}
+
+		if err := sdkStream.Err(); err != nil {
+			send(aisdk.StreamEvent{Type: aisdk.StreamEventTypeError, Err: mapError(err)})
+		}
+	}()
+
+	return events, nil
 }
+
