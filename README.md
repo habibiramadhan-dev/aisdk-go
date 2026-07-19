@@ -4,9 +4,9 @@ A single Go interface for calling Anthropic, OpenAI, and Gemini — one request/
 response shape and one streaming/tool-calling/structured-output API instead of
 three different provider SDKs. Modeled on Vercel AI SDK's developer experience.
 
-**Status:** early and under active development. Anthropic works today
-(non-streaming only). OpenAI and Gemini support, streaming, tool-calling, and
-structured output are all planned but not built yet.
+**Status:** early and under active development. Anthropic works today,
+including streaming. OpenAI and Gemini support, tool-calling, and structured
+output are all planned but not built yet.
 
 **Requires Go 1.22 or newer.**
 
