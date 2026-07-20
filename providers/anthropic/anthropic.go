@@ -57,6 +57,8 @@ func (m *model) Stream(ctx context.Context, req aisdk.GenerateRequest) (<-chan a
 
 		var finishReason aisdk.FinishReason
 		var usage aisdk.Usage
+		toolCallIDs := make(map[int64]string)
+		toolCallNames := make(map[int64]string)
 
 		send := func(e aisdk.StreamEvent) bool {
 			select {
@@ -78,6 +80,32 @@ func (m *model) Stream(ctx context.Context, req aisdk.GenerateRequest) (<-chan a
 			}
 
 			switch event.Type {
+			case "content_block_start":
+				if event.ContentBlock.Type != "tool_use" {
+					continue
+				}
+				toolCallIDs[event.Index] = event.ContentBlock.ID
+				toolCallNames[event.Index] = event.ContentBlock.Name
+				if !send(aisdk.StreamEvent{
+					Type:     aisdk.StreamEventTypeToolCallDelta,
+					ToolCall: &aisdk.ToolCall{ID: event.ContentBlock.ID, Name: event.ContentBlock.Name},
+				}) {
+					return
+				}
+			case "content_block_delta":
+				if event.Delta.Type != "input_json_delta" {
+					continue
+				}
+				if !send(aisdk.StreamEvent{
+					Type:  aisdk.StreamEventTypeToolCallDelta,
+					Delta: event.Delta.PartialJSON,
+					ToolCall: &aisdk.ToolCall{
+						ID:   toolCallIDs[event.Index],
+						Name: toolCallNames[event.Index],
+					},
+				}) {
+					return
+				}
 			case "message_delta":
 				finishReason = toFinishReason(event.Delta.StopReason)
 				usage = aisdk.Usage{

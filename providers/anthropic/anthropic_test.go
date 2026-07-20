@@ -199,6 +199,165 @@ func TestModel_Generate_ErrorNeverLeaksAPIKey(t *testing.T) {
 	}
 }
 
+func TestModel_Generate_SendsToolDeclarations(t *testing.T) {
+	var capturedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fakeSuccessResponse))
+	}))
+	t.Cleanup(server.Close)
+
+	provider := anthropicprovider.New("test-api-key", option.WithBaseURL(server.URL))
+	model := provider.Model("claude-sonnet-5")
+
+	_, err := model.Generate(context.Background(), aisdk.GenerateRequest{
+		Messages: []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("What's the weather in Paris?")}}},
+		Tools: []aisdk.Tool{{
+			Name:        "get_weather",
+			Description: "Gets the current weather for a location",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}`),
+		}},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+
+	tools, ok := capturedBody["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("request body tools = %+v, want a 1-element array", capturedBody["tools"])
+	}
+	tool, ok := tools[0].(map[string]any)
+	if !ok || tool["name"] != "get_weather" {
+		t.Fatalf("tools[0] = %+v, want name %q", tools[0], "get_weather")
+	}
+	schema, ok := tool["input_schema"].(map[string]any)
+	if !ok {
+		t.Fatalf("tools[0].input_schema = %+v, want an object", tool["input_schema"])
+	}
+	if _, ok := schema["properties"].(map[string]any)["location"]; !ok {
+		t.Errorf("tools[0].input_schema.properties = %+v, want a %q key", schema["properties"], "location")
+	}
+	required, ok := schema["required"].([]any)
+	if !ok || len(required) != 1 || required[0] != "location" {
+		t.Errorf("tools[0].input_schema.required = %+v, want [\"location\"]", schema["required"])
+	}
+}
+
+const fakeToolCallResponse = `{
+  "id": "msg_test456",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-5",
+  "content": [
+    {"type": "tool_use", "id": "toolu_01abc", "name": "get_weather", "input": {"location":"Paris"}}
+  ],
+  "stop_reason": "tool_use",
+  "usage": {"input_tokens": 20, "output_tokens": 10}
+}`
+
+func TestModel_Generate_ReturnsToolCall(t *testing.T) {
+	server := fakeAnthropicServer(t, http.StatusOK, fakeToolCallResponse)
+	provider := anthropicprovider.New("test-api-key", option.WithBaseURL(server.URL))
+	model := provider.Model("claude-sonnet-5")
+
+	resp, err := model.Generate(context.Background(), aisdk.GenerateRequest{
+		Messages:  []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("What's the weather in Paris?")}}},
+		Tools:     []aisdk.Tool{{Name: "get_weather", Description: "...", Parameters: json.RawMessage(`{"type":"object"}`)}},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+
+	var toolCall *aisdk.ToolCall
+	for _, part := range resp.Message.Parts {
+		if part.Type == aisdk.ContentPartTypeToolCall {
+			toolCall = part.ToolCall
+		}
+	}
+	if toolCall == nil {
+		t.Fatal("resp.Message.Parts has no tool call part")
+	}
+	if toolCall.ID != "toolu_01abc" {
+		t.Errorf("toolCall.ID = %q, want %q", toolCall.ID, "toolu_01abc")
+	}
+	if toolCall.Name != "get_weather" {
+		t.Errorf("toolCall.Name = %q, want %q", toolCall.Name, "get_weather")
+	}
+	if string(toolCall.Arguments) != `{"location":"Paris"}` {
+		t.Errorf("toolCall.Arguments = %s, want %s", toolCall.Arguments, `{"location":"Paris"}`)
+	}
+	if resp.FinishReason != aisdk.FinishReasonToolCalls {
+		t.Errorf("resp.FinishReason = %q, want %q", resp.FinishReason, aisdk.FinishReasonToolCalls)
+	}
+}
+
+func TestModel_Generate_SendsToolCallAndResultHistory(t *testing.T) {
+	var capturedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fakeSuccessResponse))
+	}))
+	t.Cleanup(server.Close)
+
+	provider := anthropicprovider.New("test-api-key", option.WithBaseURL(server.URL))
+	model := provider.Model("claude-sonnet-5")
+
+	_, err := model.Generate(context.Background(), aisdk.GenerateRequest{
+		Messages: []aisdk.Message{
+			{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("What's the weather in Paris?")}},
+			{Role: aisdk.RoleAssistant, Parts: []aisdk.ContentPart{{
+				Type:     aisdk.ContentPartTypeToolCall,
+				ToolCall: &aisdk.ToolCall{ID: "toolu_01abc", Name: "get_weather", Arguments: json.RawMessage(`{"location":"Paris"}`)},
+			}}},
+			{Role: aisdk.RoleTool, Parts: []aisdk.ContentPart{{
+				Type:       aisdk.ContentPartTypeToolResult,
+				ToolResult: &aisdk.ToolResult{ToolCallID: "toolu_01abc", Content: "18°C, cloudy"},
+			}}},
+		},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+
+	messages, ok := capturedBody["messages"].([]any)
+	if !ok || len(messages) != 3 {
+		t.Fatalf("request body messages = %+v, want a 3-element array", capturedBody["messages"])
+	}
+
+	assistantMsg, ok := messages[1].(map[string]any)
+	if !ok || assistantMsg["role"] != "assistant" {
+		t.Fatalf("messages[1] = %+v, want role %q", messages[1], "assistant")
+	}
+	assistantContent, ok := assistantMsg["content"].([]any)
+	if !ok || len(assistantContent) != 1 {
+		t.Fatalf("messages[1].content = %+v, want a 1-element array", assistantMsg["content"])
+	}
+	toolUseBlock, ok := assistantContent[0].(map[string]any)
+	if !ok || toolUseBlock["type"] != "tool_use" || toolUseBlock["id"] != "toolu_01abc" || toolUseBlock["name"] != "get_weather" {
+		t.Errorf("messages[1].content[0] = %+v, want a tool_use block for toolu_01abc/get_weather", assistantContent[0])
+	}
+
+	toolResultMsg, ok := messages[2].(map[string]any)
+	if !ok || toolResultMsg["role"] != "user" {
+		t.Fatalf("messages[2] = %+v, want role %q (tool results go under user)", messages[2], "user")
+	}
+	toolResultContent, ok := toolResultMsg["content"].([]any)
+	if !ok || len(toolResultContent) != 1 {
+		t.Fatalf("messages[2].content = %+v, want a 1-element array", toolResultMsg["content"])
+	}
+	toolResultBlock, ok := toolResultContent[0].(map[string]any)
+	if !ok || toolResultBlock["type"] != "tool_result" || toolResultBlock["tool_use_id"] != "toolu_01abc" {
+		t.Errorf("messages[2].content[0] = %+v, want a tool_result block for toolu_01abc", toolResultContent[0])
+	}
+}
+
 func TestAnthropicModel_ConformanceSuite(t *testing.T) {
 	aisdktest.RunConformanceSuite(t, func(t *testing.T) aisdk.Model {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -219,6 +378,13 @@ func TestAnthropicModel_ConformanceSuite(t *testing.T) {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.WriteHeader(http.StatusOK)
 				w.Write([]byte(fakeStreamSSE))
+				return
+			}
+
+			if tools, _ := body["tools"].([]any); len(tools) > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(fakeToolCallResponse))
 				return
 			}
 
@@ -440,6 +606,69 @@ func TestModel_Stream_MapsErrorEventThroughMapError(t *testing.T) {
 	}
 	if !aisdkErr.Retryable {
 		t.Error("aisdkErr.Retryable = false, want true for overloaded_error")
+	}
+}
+
+const fakeToolCallStreamSSE = "event: content_block_start\n" +
+	`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01abc","name":"get_weather","input":{}}}` + "\n\n" +
+	"event: content_block_delta\n" +
+	`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"location\":"}}` + "\n\n" +
+	"event: content_block_delta\n" +
+	`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"Paris\"}"}}` + "\n\n" +
+	"event: content_block_stop\n" +
+	`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+	"event: message_delta\n" +
+	`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":10}}` + "\n\n" +
+	"event: message_stop\n" +
+	`data: {"type":"message_stop"}` + "\n\n"
+
+func TestModel_Stream_EmitsToolCallDeltas(t *testing.T) {
+	server := fakeAnthropicSSEServer(t, fakeToolCallStreamSSE)
+	provider := anthropicprovider.New("test-api-key", option.WithBaseURL(server.URL))
+	model := provider.Model("claude-sonnet-5")
+
+	stream, err := model.Stream(context.Background(), aisdk.GenerateRequest{
+		Messages:  []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("What's the weather in Paris?")}}},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+
+	events := collectStreamEvents(t, stream)
+
+	var toolCallEvents []aisdk.StreamEvent
+	for _, e := range events {
+		if e.Type == aisdk.StreamEventTypeToolCallDelta {
+			toolCallEvents = append(toolCallEvents, e)
+		}
+	}
+	if len(toolCallEvents) != 3 {
+		t.Fatalf("got %d ToolCallDelta events, want 3 (1 start + 2 argument fragments)", len(toolCallEvents))
+	}
+
+	var argsJSON string
+	for _, e := range toolCallEvents {
+		if e.ToolCall == nil || e.ToolCall.ID != "toolu_01abc" || e.ToolCall.Name != "get_weather" {
+			t.Errorf("event.ToolCall = %+v, want ID %q and Name %q on every event", e.ToolCall, "toolu_01abc", "get_weather")
+		}
+		argsJSON += e.Delta
+	}
+	if argsJSON != `{"location":"Paris"}` {
+		t.Errorf("accumulated Delta = %s, want %s", argsJSON, `{"location":"Paris"}`)
+	}
+
+	var finish *aisdk.StreamEvent
+	for i := range events {
+		if events[i].Type == aisdk.StreamEventTypeFinish {
+			finish = &events[i]
+		}
+	}
+	if finish == nil {
+		t.Fatal("no Finish event")
+	}
+	if finish.FinishReason != aisdk.FinishReasonToolCalls {
+		t.Errorf("finish.FinishReason = %q, want %q", finish.FinishReason, aisdk.FinishReasonToolCalls)
 	}
 }
 

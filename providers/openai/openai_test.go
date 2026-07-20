@@ -409,6 +409,110 @@ func TestModel_Stream_StopsSendingAfterContextCancelled(t *testing.T) {
 	}
 }
 
+func TestModel_Generate_SendsToolDeclarations(t *testing.T) {
+	var capturedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fakeSuccessResponse))
+	}))
+	t.Cleanup(server.Close)
+
+	provider := openaiprovider.New("test-api-key", option.WithBaseURL(server.URL))
+	model := provider.Model("gpt-4o")
+
+	_, err := model.Generate(context.Background(), aisdk.GenerateRequest{
+		Messages: []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("What's the weather in Paris?")}}},
+		Tools: []aisdk.Tool{{
+			Name:        "get_weather",
+			Description: "Gets the current weather for a location",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}`),
+		}},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+
+	tools, ok := capturedBody["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("request body tools = %+v, want a 1-element array", capturedBody["tools"])
+	}
+	tool, ok := tools[0].(map[string]any)
+	if !ok || tool["type"] != "function" {
+		t.Fatalf("tools[0] = %+v, want type %q", tools[0], "function")
+	}
+	function, ok := tool["function"].(map[string]any)
+	if !ok || function["name"] != "get_weather" {
+		t.Fatalf("tools[0].function = %+v, want name %q", tool["function"], "get_weather")
+	}
+	parameters, ok := function["parameters"].(map[string]any)
+	if !ok {
+		t.Fatalf("tools[0].function.parameters = %+v, want an object", function["parameters"])
+	}
+	if parameters["type"] != "object" {
+		t.Errorf("tools[0].function.parameters.type = %v, want %q", parameters["type"], "object")
+	}
+}
+
+const fakeToolCallResponse = `{
+  "id": "chatcmpl_test789",
+  "object": "chat.completion",
+  "created": 1700000000,
+  "model": "gpt-4o",
+  "choices": [{
+    "index": 0,
+    "message": {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [{
+        "id": "call_abc123",
+        "type": "function",
+        "function": {"name": "get_weather", "arguments": "{\"location\":\"Paris\"}"}
+      }]
+    },
+    "finish_reason": "tool_calls",
+    "logprobs": null
+  }],
+  "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30}
+}`
+
+func TestModel_Generate_ReturnsToolCall(t *testing.T) {
+	server := fakeOpenAIServer(t, http.StatusOK, fakeToolCallResponse)
+	provider := openaiprovider.New("test-api-key", option.WithBaseURL(server.URL))
+	model := provider.Model("gpt-4o")
+
+	resp, err := model.Generate(context.Background(), aisdk.GenerateRequest{
+		Messages: []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("What's the weather in Paris?")}}},
+		Tools: []aisdk.Tool{{Name: "get_weather", Description: "...", Parameters: json.RawMessage(`{"type":"object"}`)}},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+
+	if len(resp.Message.Parts) != 1 {
+		t.Fatalf("resp.Message.Parts = %+v, want exactly 1 part (no text, one tool call)", resp.Message.Parts)
+	}
+	part := resp.Message.Parts[0]
+	if part.Type != aisdk.ContentPartTypeToolCall {
+		t.Fatalf("resp.Message.Parts[0].Type = %q, want %q", part.Type, aisdk.ContentPartTypeToolCall)
+	}
+	if part.ToolCall.ID != "call_abc123" {
+		t.Errorf("part.ToolCall.ID = %q, want %q", part.ToolCall.ID, "call_abc123")
+	}
+	if part.ToolCall.Name != "get_weather" {
+		t.Errorf("part.ToolCall.Name = %q, want %q", part.ToolCall.Name, "get_weather")
+	}
+	if string(part.ToolCall.Arguments) != `{"location":"Paris"}` {
+		t.Errorf("part.ToolCall.Arguments = %s, want %s", part.ToolCall.Arguments, `{"location":"Paris"}`)
+	}
+	if resp.FinishReason != aisdk.FinishReasonToolCalls {
+		t.Errorf("resp.FinishReason = %q, want %q", resp.FinishReason, aisdk.FinishReasonToolCalls)
+	}
+}
+
 func TestOpenAIModel_ConformanceSuite(t *testing.T) {
 	aisdktest.RunConformanceSuite(t, func(t *testing.T) aisdk.Model {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -420,10 +524,27 @@ func TestOpenAIModel_ConformanceSuite(t *testing.T) {
 				return
 			}
 
-			if streaming, _ := body["stream"].(bool); streaming {
+			streaming, _ := body["stream"].(bool)
+			tools, _ := body["tools"].([]any)
+
+			if streaming && len(tools) > 0 {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(fakeToolCallStreamSSE))
+				return
+			}
+
+			if streaming {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.WriteHeader(http.StatusOK)
 				w.Write([]byte(fakeStreamSSE))
+				return
+			}
+
+			if len(tools) > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(fakeToolCallResponse))
 				return
 			}
 
@@ -436,4 +557,129 @@ func TestOpenAIModel_ConformanceSuite(t *testing.T) {
 		provider := openaiprovider.New("test-api-key", option.WithBaseURL(server.URL))
 		return provider.Model("gpt-4o")
 	})
+}
+
+func TestModel_Generate_SendsToolCallAndResultHistory(t *testing.T) {
+	var capturedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fakeSuccessResponse))
+	}))
+	t.Cleanup(server.Close)
+
+	provider := openaiprovider.New("test-api-key", option.WithBaseURL(server.URL))
+	model := provider.Model("gpt-4o")
+
+	_, err := model.Generate(context.Background(), aisdk.GenerateRequest{
+		Messages: []aisdk.Message{
+			{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("What's the weather in Paris?")}},
+			{Role: aisdk.RoleAssistant, Parts: []aisdk.ContentPart{{
+				Type:     aisdk.ContentPartTypeToolCall,
+				ToolCall: &aisdk.ToolCall{ID: "call_abc123", Name: "get_weather", Arguments: json.RawMessage(`{"location":"Paris"}`)},
+			}}},
+			{Role: aisdk.RoleTool, Parts: []aisdk.ContentPart{{
+				Type:       aisdk.ContentPartTypeToolResult,
+				ToolResult: &aisdk.ToolResult{ToolCallID: "call_abc123", Content: "18°C, cloudy"},
+			}}},
+		},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+
+	messages, ok := capturedBody["messages"].([]any)
+	if !ok || len(messages) != 3 {
+		t.Fatalf("request body messages = %+v, want a 3-element array", capturedBody["messages"])
+	}
+
+	assistantMsg, ok := messages[1].(map[string]any)
+	if !ok || assistantMsg["role"] != "assistant" {
+		t.Fatalf("messages[1] = %+v, want role %q", messages[1], "assistant")
+	}
+	toolCalls, ok := assistantMsg["tool_calls"].([]any)
+	if !ok || len(toolCalls) != 1 {
+		t.Fatalf("messages[1].tool_calls = %+v, want a 1-element array", assistantMsg["tool_calls"])
+	}
+	toolCall, ok := toolCalls[0].(map[string]any)
+	if !ok || toolCall["id"] != "call_abc123" {
+		t.Errorf("messages[1].tool_calls[0] = %+v, want id %q", toolCalls[0], "call_abc123")
+	}
+
+	toolResultMsg, ok := messages[2].(map[string]any)
+	if !ok || toolResultMsg["role"] != "tool" {
+		t.Fatalf("messages[2] = %+v, want role %q", messages[2], "tool")
+	}
+	if toolResultMsg["tool_call_id"] != "call_abc123" {
+		t.Errorf("messages[2].tool_call_id = %v, want %q", toolResultMsg["tool_call_id"], "call_abc123")
+	}
+	if toolResultMsg["content"] != "18°C, cloudy" {
+		t.Errorf("messages[2].content = %v, want %q", toolResultMsg["content"], "18°C, cloudy")
+	}
+}
+
+const fakeToolCallStreamSSE = `data: {"id":"chatcmpl_test","object":"chat.completion.chunk","created":1,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_test","object":"chat.completion.chunk","created":1,"model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"location\":"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_test","object":"chat.completion.chunk","created":1,"model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Paris\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_test","object":"chat.completion.chunk","created":1,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl_test","object":"chat.completion.chunk","created":1,"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}}
+
+data: [DONE]
+
+`
+
+func TestModel_Stream_EmitsToolCallDeltas(t *testing.T) {
+	server := fakeOpenAISSEServer(t, fakeToolCallStreamSSE)
+	provider := openaiprovider.New("test-api-key", option.WithBaseURL(server.URL))
+	model := provider.Model("gpt-4o")
+
+	stream, err := model.Stream(context.Background(), aisdk.GenerateRequest{
+		Messages:  []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("What's the weather in Paris?")}}},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+
+	events := collectStreamEvents(t, stream)
+
+	var toolCallEvents []aisdk.StreamEvent
+	for _, e := range events {
+		if e.Type == aisdk.StreamEventTypeToolCallDelta {
+			toolCallEvents = append(toolCallEvents, e)
+		}
+	}
+	if len(toolCallEvents) != 3 {
+		t.Fatalf("got %d ToolCallDelta events, want 3", len(toolCallEvents))
+	}
+
+	var argsJSON string
+	for _, e := range toolCallEvents {
+		if e.ToolCall == nil || e.ToolCall.ID != "call_abc123" || e.ToolCall.Name != "get_weather" {
+			t.Errorf("event.ToolCall = %+v, want ID %q and Name %q on every event (including after the first delta, where the wire itself omits them)", e.ToolCall, "call_abc123", "get_weather")
+		}
+		argsJSON += e.Delta
+	}
+	if argsJSON != `{"location":"Paris"}` {
+		t.Errorf("accumulated Delta = %s, want %s", argsJSON, `{"location":"Paris"}`)
+	}
+
+	var finish *aisdk.StreamEvent
+	for i := range events {
+		if events[i].Type == aisdk.StreamEventTypeFinish {
+			finish = &events[i]
+		}
+	}
+	if finish == nil {
+		t.Fatal("no Finish event")
+	}
+	if finish.FinishReason != aisdk.FinishReasonToolCalls {
+		t.Errorf("finish.FinishReason = %q, want %q", finish.FinishReason, aisdk.FinishReasonToolCalls)
+	}
 }

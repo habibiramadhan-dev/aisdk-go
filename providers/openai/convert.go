@@ -2,10 +2,12 @@
 package openai
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 
 	openaisdk "github.com/openai/openai-go/v2"
+	"github.com/openai/openai-go/v2/packages/param"
 	"github.com/habibiramadhan-dev/aisdk-go"
 )
 
@@ -18,16 +20,58 @@ func toChatCompletionParams(modelName string, req aisdk.GenerateRequest) openais
 
 	for _, msg := range req.Messages {
 		var text string
+		var toolCallParts []aisdk.ContentPart
 		for _, part := range msg.Parts {
-			if part.Type == aisdk.ContentPartTypeText {
+			switch part.Type {
+			case aisdk.ContentPartTypeText:
 				text += part.Text
+			case aisdk.ContentPartTypeToolCall:
+				toolCallParts = append(toolCallParts, part)
 			}
 		}
+
 		switch msg.Role {
 		case aisdk.RoleUser:
 			messages = append(messages, openaisdk.UserMessage(text))
+
 		case aisdk.RoleAssistant:
-			messages = append(messages, openaisdk.AssistantMessage(text))
+			if len(toolCallParts) == 0 {
+				messages = append(messages, openaisdk.AssistantMessage(text))
+				continue
+			}
+			// No plain-string helper covers an assistant turn that made tool
+			// calls (openaisdk.AssistantMessage only ever sets Content) — the
+			// param struct has to be hand-built, matching what a fresh
+			// go doc github.com/openai/openai-go/v2.ChatCompletionAssistantMessageParam
+			// confirms: Content is "required unless tool_calls ... is specified".
+			assistant := openaisdk.ChatCompletionAssistantMessageParam{}
+			if text != "" {
+				assistant.Content.OfString = param.NewOpt(text)
+			}
+			for _, part := range toolCallParts {
+				assistant.ToolCalls = append(assistant.ToolCalls, openaisdk.ChatCompletionMessageToolCallUnionParam{
+					OfFunction: &openaisdk.ChatCompletionMessageFunctionToolCallParam{
+						ID: part.ToolCall.ID,
+						Function: openaisdk.ChatCompletionMessageFunctionToolCallFunctionParam{
+							Name:      part.ToolCall.Name,
+							Arguments: string(part.ToolCall.Arguments),
+						},
+					},
+				})
+			}
+			messages = append(messages, openaisdk.ChatCompletionMessageParamUnion{OfAssistant: &assistant})
+
+		case aisdk.RoleTool:
+			// OpenAI has no equivalent of Anthropic's "all results in one
+			// message" shape — every tool result is its own role:"tool"
+			// message, so one aisdk.Message with N ToolResult parts becomes
+			// N entries in the flat OpenAI messages slice.
+			for _, part := range msg.Parts {
+				if part.Type != aisdk.ContentPartTypeToolResult {
+					continue
+				}
+				messages = append(messages, openaisdk.ToolMessage(part.ToolResult.Content, part.ToolResult.ToolCallID))
+			}
 		}
 	}
 
@@ -39,7 +83,29 @@ func toChatCompletionParams(modelName string, req aisdk.GenerateRequest) openais
 	if req.Temperature != 0 {
 		params.Temperature = openaisdk.Float(req.Temperature)
 	}
+	params.Tools = toToolUnionParams(req.Tools)
 	return params
+}
+
+func toToolUnionParams(tools []aisdk.Tool) []openaisdk.ChatCompletionToolUnionParam {
+	if len(tools) == 0 {
+		return nil
+	}
+	result := make([]openaisdk.ChatCompletionToolUnionParam, 0, len(tools))
+	for _, t := range tools {
+		// Errors are ignored (best-effort) — t.Parameters is caller-supplied
+		// and schema validation is the caller's responsibility, the same
+		// trust boundary design.md §8 already applies to ToolCall.Arguments.
+		var parameters openaisdk.FunctionParameters
+		json.Unmarshal(t.Parameters, &parameters)
+
+		result = append(result, openaisdk.ChatCompletionFunctionTool(openaisdk.FunctionDefinitionParam{
+			Name:        t.Name,
+			Description: openaisdk.String(t.Description),
+			Parameters:  parameters,
+		}))
+	}
+	return result
 }
 
 func toGenerateResponse(resp *openaisdk.ChatCompletion) (aisdk.GenerateResponse, error) {
@@ -47,10 +113,26 @@ func toGenerateResponse(resp *openaisdk.ChatCompletion) (aisdk.GenerateResponse,
 		return aisdk.GenerateResponse{}, fmt.Errorf("openai: response had no choices (id=%s)", resp.ID)
 	}
 	choice := resp.Choices[0]
+
+	var parts []aisdk.ContentPart
+	if choice.Message.Content != "" {
+		parts = append(parts, aisdk.TextPart(choice.Message.Content))
+	}
+	for _, tc := range choice.Message.ToolCalls {
+		parts = append(parts, aisdk.ContentPart{
+			Type: aisdk.ContentPartTypeToolCall,
+			ToolCall: &aisdk.ToolCall{
+				ID:        tc.ID,
+				Name:      tc.Function.Name,
+				Arguments: json.RawMessage(tc.Function.Arguments),
+			},
+		})
+	}
+
 	return aisdk.GenerateResponse{
 		Message: aisdk.Message{
 			Role:  aisdk.RoleAssistant,
-			Parts: []aisdk.ContentPart{aisdk.TextPart(choice.Message.Content)},
+			Parts: parts,
 		},
 		FinishReason: toFinishReason(choice.FinishReason),
 		Usage: aisdk.Usage{

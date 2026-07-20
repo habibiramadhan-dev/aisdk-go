@@ -2,6 +2,7 @@
 package anthropic
 
 import (
+	"encoding/json"
 	"errors"
 
 	anthropicsdk "github.com/anthropics/anthropic-sdk-go"
@@ -21,16 +22,25 @@ func toMessageNewParams(modelName string, req aisdk.GenerateRequest) anthropicsd
 	if req.Temperature != 0 {
 		params.Temperature = anthropicsdk.Float(req.Temperature)
 	}
+	params.Tools = toToolUnionParams(req.Tools)
 
 	for _, msg := range req.Messages {
 		blocks := make([]anthropicsdk.ContentBlockParamUnion, 0, len(msg.Parts))
 		for _, part := range msg.Parts {
-			if part.Type == aisdk.ContentPartTypeText {
+			switch part.Type {
+			case aisdk.ContentPartTypeText:
 				blocks = append(blocks, anthropicsdk.NewTextBlock(part.Text))
+			case aisdk.ContentPartTypeToolCall:
+				blocks = append(blocks, anthropicsdk.NewToolUseBlock(part.ToolCall.ID, part.ToolCall.Arguments, part.ToolCall.Name))
+			case aisdk.ContentPartTypeToolResult:
+				blocks = append(blocks, anthropicsdk.NewToolResultBlock(part.ToolResult.ToolCallID, part.ToolResult.Content, part.ToolResult.IsError))
 			}
 		}
 		switch msg.Role {
-		case aisdk.RoleUser:
+		case aisdk.RoleUser, aisdk.RoleTool:
+			// Tool results are a user-role turn in Anthropic's API — a
+			// ToolResultBlockParam is just another content block inside a
+			// normal user message, there's no separate "tool" role.
 			params.Messages = append(params.Messages, anthropicsdk.NewUserMessage(blocks...))
 		case aisdk.RoleAssistant:
 			params.Messages = append(params.Messages, anthropicsdk.NewAssistantMessage(blocks...))
@@ -40,11 +50,54 @@ func toMessageNewParams(modelName string, req aisdk.GenerateRequest) anthropicsd
 	return params
 }
 
+func toToolUnionParams(tools []aisdk.Tool) []anthropicsdk.ToolUnionParam {
+	if len(tools) == 0 {
+		return nil
+	}
+	result := make([]anthropicsdk.ToolUnionParam, 0, len(tools))
+	for _, t := range tools {
+		// Anthropic's InputSchema wants properties/required as separate
+		// fields, not a whole JSON Schema document — pluck just those two
+		// keys out of the caller-supplied schema via an anonymous struct
+		// rather than hand-walking a map[string]any.
+		var schema struct {
+			Properties any      `json:"properties"`
+			Required   []string `json:"required"`
+		}
+		// Errors are ignored (best-effort) — t.Parameters is caller-supplied
+		// and schema validation is the caller's responsibility, the same
+		// trust boundary design.md §8 already applies to ToolCall.Arguments.
+		json.Unmarshal(t.Parameters, &schema)
+
+		result = append(result, anthropicsdk.ToolUnionParam{
+			OfTool: &anthropicsdk.ToolParam{
+				Name:        t.Name,
+				Description: anthropicsdk.String(t.Description),
+				InputSchema: anthropicsdk.ToolInputSchemaParam{
+					Properties: schema.Properties,
+					Required:   schema.Required,
+				},
+			},
+		})
+	}
+	return result
+}
+
 func toGenerateResponse(msg *anthropicsdk.Message) aisdk.GenerateResponse {
 	parts := make([]aisdk.ContentPart, 0, len(msg.Content))
 	for _, block := range msg.Content {
-		if block.Type == "text" {
+		switch block.Type {
+		case "text":
 			parts = append(parts, aisdk.TextPart(block.Text))
+		case "tool_use":
+			parts = append(parts, aisdk.ContentPart{
+				Type: aisdk.ContentPartTypeToolCall,
+				ToolCall: &aisdk.ToolCall{
+					ID:        block.ID,
+					Name:      block.Name,
+					Arguments: block.Input,
+				},
+			})
 		}
 	}
 
@@ -118,13 +171,15 @@ func mapError(err error) error {
 }
 
 // toStreamEvent converts a single per-delta SDK stream event into an
-// aisdk.StreamEvent. It only handles text/thinking content_block_delta —
-// tool-calling isn't implemented yet, so input_json_delta and the tool
-// name/ID carried on content_block_start are intentionally dropped here for
-// now (retrofitting tool-call streaming will need content_block_start too,
-// not just deltas). message_start/content_block_stop truly carry nothing we
-// need. message_delta/message_stop are handled statefully in Stream itself,
-// not here, since the terminal Finish event needs data from both.
+// aisdk.StreamEvent. It only handles text/thinking content_block_delta and
+// stays a pure, stateless function on purpose — tool-call streaming needs to
+// correlate content_block_start's {ID, Name} with later input_json_delta
+// fragments by Index, which is inherently stateful, so that's handled
+// directly in Stream()'s goroutine locals instead (alongside the similarly
+// stateful finishReason/usage accumulation), not here. message_start/
+// content_block_stop truly carry nothing we need. message_delta/message_stop
+// are also handled statefully in Stream itself, since the terminal Finish
+// event needs data from both.
 func toStreamEvent(event anthropicsdk.MessageStreamEventUnion) (aisdk.StreamEvent, bool) {
 	if event.Type != "content_block_delta" {
 		return aisdk.StreamEvent{}, false

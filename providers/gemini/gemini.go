@@ -3,6 +3,8 @@ package gemini
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 
 	"github.com/habibiramadhan-dev/aisdk-go"
 	genaisdk "google.golang.org/genai"
@@ -78,6 +80,7 @@ func (m *model) Stream(ctx context.Context, req aisdk.GenerateRequest) (<-chan a
 
 		var finishReason aisdk.FinishReason
 		var usage aisdk.Usage
+		var sawToolCall bool
 
 		send := func(e aisdk.StreamEvent) bool {
 			select {
@@ -100,6 +103,30 @@ func (m *model) Stream(ctx context.Context, req aisdk.GenerateRequest) (<-chan a
 				}
 			}
 
+			if len(chunk.Candidates) > 0 && chunk.Candidates[0].Content != nil {
+				for i, part := range chunk.Candidates[0].Content.Parts {
+					if part.FunctionCall == nil {
+						continue
+					}
+					sawToolCall = true
+					argsJSON, err := json.Marshal(part.FunctionCall.Args)
+					if err != nil {
+						send(aisdk.StreamEvent{Type: aisdk.StreamEventTypeError, Err: fmt.Errorf("gemini: marshaling function call args: %w", err)})
+						return
+					}
+					if !send(aisdk.StreamEvent{
+						Type:  aisdk.StreamEventTypeToolCallDelta,
+						Delta: string(argsJSON),
+						ToolCall: &aisdk.ToolCall{
+							ID:   fmt.Sprintf("gemini-tool-call-%d", i),
+							Name: part.FunctionCall.Name,
+						},
+					}) {
+						return
+					}
+				}
+			}
+
 			if len(chunk.Candidates) > 0 && chunk.Candidates[0].FinishReason != "" {
 				finishReason = toFinishReason(chunk.Candidates[0].FinishReason)
 			}
@@ -115,6 +142,9 @@ func (m *model) Stream(ctx context.Context, req aisdk.GenerateRequest) (<-chan a
 			return
 		}
 
+		if sawToolCall {
+			finishReason = aisdk.FinishReasonToolCalls
+		}
 		send(aisdk.StreamEvent{Type: aisdk.StreamEventTypeFinish, FinishReason: finishReason, Usage: usage})
 	}()
 

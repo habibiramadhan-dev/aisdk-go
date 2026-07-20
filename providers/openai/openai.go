@@ -60,6 +60,8 @@ func (m *model) Stream(ctx context.Context, req aisdk.GenerateRequest) (<-chan a
 
 		var finishReason aisdk.FinishReason
 		var usage aisdk.Usage
+		toolCallIDs := make(map[int64]string)
+		toolCallNames := make(map[int64]string)
 
 		send := func(e aisdk.StreamEvent) bool {
 			select {
@@ -76,6 +78,27 @@ func (m *model) Stream(ctx context.Context, req aisdk.GenerateRequest) (<-chan a
 			if se, ok := toStreamEvent(chunk); ok {
 				if !send(se) {
 					return
+				}
+			}
+
+			if len(chunk.Choices) > 0 {
+				for _, deltaTool := range chunk.Choices[0].Delta.ToolCalls {
+					if deltaTool.ID != "" {
+						toolCallIDs[deltaTool.Index] = deltaTool.ID
+					}
+					if deltaTool.Function.Name != "" {
+						toolCallNames[deltaTool.Index] = deltaTool.Function.Name
+					}
+					if !send(aisdk.StreamEvent{
+						Type:  aisdk.StreamEventTypeToolCallDelta,
+						Delta: deltaTool.Function.Arguments,
+						ToolCall: &aisdk.ToolCall{
+							ID:   toolCallIDs[deltaTool.Index],
+							Name: toolCallNames[deltaTool.Index],
+						},
+					}) {
+						return
+					}
 				}
 			}
 

@@ -405,18 +405,139 @@ func TestModel_Stream_StopsSendingAfterContextCancelled(t *testing.T) {
 	}
 }
 
+func TestModel_Generate_SendsToolDeclarations(t *testing.T) {
+	var capturedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fakeSuccessResponse))
+	}))
+	t.Cleanup(server.Close)
+
+	provider := newTestProvider(t, server)
+	model := provider.Model("gemini-2.0-flash")
+
+	_, err := model.Generate(context.Background(), aisdk.GenerateRequest{
+		Messages: []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("What's the weather in Paris?")}}},
+		Tools: []aisdk.Tool{{
+			Name:        "get_weather",
+			Description: "Gets the current weather for a location",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}`),
+		}},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+
+	tools, ok := capturedBody["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("request body tools = %+v, want a 1-element array", capturedBody["tools"])
+	}
+	tool, ok := tools[0].(map[string]any)
+	if !ok {
+		t.Fatalf("tools[0] = %+v, want an object", tools[0])
+	}
+	declarations, ok := tool["functionDeclarations"].([]any)
+	if !ok || len(declarations) != 1 {
+		t.Fatalf("tools[0].functionDeclarations = %+v, want a 1-element array", tool["functionDeclarations"])
+	}
+	declaration, ok := declarations[0].(map[string]any)
+	if !ok || declaration["name"] != "get_weather" {
+		t.Fatalf("functionDeclarations[0] = %+v, want name %q", declarations[0], "get_weather")
+	}
+	schema, ok := declaration["parametersJsonSchema"].(map[string]any)
+	if !ok {
+		t.Fatalf("functionDeclarations[0].parametersJsonSchema = %+v, want an object", declaration["parametersJsonSchema"])
+	}
+	if _, ok := schema["properties"].(map[string]any)["location"]; !ok {
+		t.Errorf("parametersJsonSchema.properties = %+v, want a %q key", schema["properties"], "location")
+	}
+}
+
+const fakeToolCallResponse = `{
+  "candidates": [{
+    "content": {"role": "model", "parts": [{"functionCall": {"name": "get_weather", "args": {"location": "Paris"}}}]},
+    "finishReason": "STOP",
+    "index": 0
+  }],
+  "usageMetadata": {
+    "promptTokenCount": 20,
+    "candidatesTokenCount": 10,
+    "totalTokenCount": 30
+  },
+  "modelVersion": "gemini-2.0-flash"
+}`
+
+func TestModel_Generate_ReturnsToolCall(t *testing.T) {
+	server := fakeGeminiServer(t, http.StatusOK, fakeToolCallResponse)
+	provider := newTestProvider(t, server)
+	model := provider.Model("gemini-2.0-flash")
+
+	resp, err := model.Generate(context.Background(), aisdk.GenerateRequest{
+		Messages:  []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("What's the weather in Paris?")}}},
+		Tools:     []aisdk.Tool{{Name: "get_weather", Description: "...", Parameters: json.RawMessage(`{"type":"object"}`)}},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+
+	if len(resp.Message.Parts) != 1 {
+		t.Fatalf("resp.Message.Parts = %+v, want exactly 1 part", resp.Message.Parts)
+	}
+	part := resp.Message.Parts[0]
+	if part.Type != aisdk.ContentPartTypeToolCall {
+		t.Fatalf("resp.Message.Parts[0].Type = %q, want %q", part.Type, aisdk.ContentPartTypeToolCall)
+	}
+	if part.ToolCall.ID == "" {
+		t.Error("part.ToolCall.ID is empty, want a synthesized ID")
+	}
+	if part.ToolCall.Name != "get_weather" {
+		t.Errorf("part.ToolCall.Name = %q, want %q", part.ToolCall.Name, "get_weather")
+	}
+
+	var args map[string]any
+	if err := json.Unmarshal(part.ToolCall.Arguments, &args); err != nil {
+		t.Fatalf("part.ToolCall.Arguments = %s, not valid JSON: %v", part.ToolCall.Arguments, err)
+	}
+	if args["location"] != "Paris" {
+		t.Errorf("part.ToolCall.Arguments location = %v, want %q", args["location"], "Paris")
+	}
+
+	// Gemini's raw finishReason is "STOP" even for a function-call turn — the
+	// adapter must override to ToolCalls based on Parts content, not trust
+	// the raw enum (confirmed against real recorded Gemini API output).
+	if resp.FinishReason != aisdk.FinishReasonToolCalls {
+		t.Errorf("resp.FinishReason = %q, want %q (overridden from the raw \"STOP\")", resp.FinishReason, aisdk.FinishReasonToolCalls)
+	}
+}
+
 func TestGeminiModel_ConformanceSuite(t *testing.T) {
 	aisdktest.RunConformanceSuite(t, func(t *testing.T) aisdk.Model {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			tools, _ := body["tools"].([]any)
+
 			if strings.Contains(r.URL.Path, "streamGenerateContent") {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.WriteHeader(http.StatusOK)
+				if len(tools) > 0 {
+					w.Write([]byte(fakeToolCallStreamSSE))
+					return
+				}
 				w.Write([]byte(fakeStreamSSE))
 				return
 			}
 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
+			if len(tools) > 0 {
+				w.Write([]byte(fakeToolCallResponse))
+				return
+			}
 			w.Write([]byte(fakeSuccessResponse))
 		}))
 		t.Cleanup(server.Close)
@@ -424,4 +545,136 @@ func TestGeminiModel_ConformanceSuite(t *testing.T) {
 		provider := newTestProvider(t, server)
 		return provider.Model("gemini-2.0-flash")
 	})
+}
+
+func TestModel_Generate_SendsToolCallAndResultHistory(t *testing.T) {
+	var capturedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fakeSuccessResponse))
+	}))
+	t.Cleanup(server.Close)
+
+	provider := newTestProvider(t, server)
+	model := provider.Model("gemini-2.0-flash")
+
+	_, err := model.Generate(context.Background(), aisdk.GenerateRequest{
+		Messages: []aisdk.Message{
+			{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("What's the weather in Paris?")}},
+			{Role: aisdk.RoleAssistant, Parts: []aisdk.ContentPart{{
+				Type:     aisdk.ContentPartTypeToolCall,
+				ToolCall: &aisdk.ToolCall{ID: "gemini-tool-call-0", Name: "get_weather", Arguments: json.RawMessage(`{"location":"Paris"}`)},
+			}}},
+			{Role: aisdk.RoleTool, Parts: []aisdk.ContentPart{{
+				Type:       aisdk.ContentPartTypeToolResult,
+				ToolResult: &aisdk.ToolResult{ToolCallID: "gemini-tool-call-0", Content: "18°C, cloudy"},
+			}}},
+		},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+
+	contents, ok := capturedBody["contents"].([]any)
+	if !ok || len(contents) != 3 {
+		t.Fatalf("request body contents = %+v, want a 3-element array", capturedBody["contents"])
+	}
+
+	assistantContent, ok := contents[1].(map[string]any)
+	if !ok || assistantContent["role"] != "model" {
+		t.Fatalf("contents[1] = %+v, want role %q", contents[1], "model")
+	}
+	assistantParts, ok := assistantContent["parts"].([]any)
+	if !ok || len(assistantParts) != 1 {
+		t.Fatalf("contents[1].parts = %+v, want a 1-element array", assistantContent["parts"])
+	}
+	functionCall, ok := assistantParts[0].(map[string]any)["functionCall"].(map[string]any)
+	if !ok || functionCall["name"] != "get_weather" {
+		t.Fatalf("contents[1].parts[0].functionCall = %+v, want name %q", assistantParts[0], "get_weather")
+	}
+
+	toolResultContent, ok := contents[2].(map[string]any)
+	if !ok || toolResultContent["role"] != "user" {
+		t.Fatalf("contents[2] = %+v, want role %q", contents[2], "user")
+	}
+	toolResultParts, ok := toolResultContent["parts"].([]any)
+	if !ok || len(toolResultParts) != 1 {
+		t.Fatalf("contents[2].parts = %+v, want a 1-element array", toolResultContent["parts"])
+	}
+	functionResponse, ok := toolResultParts[0].(map[string]any)["functionResponse"].(map[string]any)
+	if !ok {
+		t.Fatalf("contents[2].parts[0].functionResponse = %+v, want an object", toolResultParts[0])
+	}
+	// The critical assertion: Name must be recovered from the earlier
+	// ToolCall in history (gemini-tool-call-0 → "get_weather"), since
+	// aisdk.ToolResult itself only carries ToolCallID, never a Name.
+	if functionResponse["name"] != "get_weather" {
+		t.Errorf("functionResponse.name = %v, want %q (recovered from message history by ToolCallID)", functionResponse["name"], "get_weather")
+	}
+	response, ok := functionResponse["response"].(map[string]any)
+	if !ok || response["output"] != "18°C, cloudy" {
+		t.Errorf("functionResponse.response = %+v, want output %q", functionResponse["response"], "18°C, cloudy")
+	}
+}
+
+const fakeToolCallStreamSSE = `data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"location":"Paris"}}}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":10,"totalTokenCount":30}}
+
+`
+
+func TestModel_Stream_EmitsToolCallDeltas(t *testing.T) {
+	server := fakeGeminiSSEServer(t, fakeToolCallStreamSSE)
+	provider := newTestProvider(t, server)
+	model := provider.Model("gemini-2.0-flash")
+
+	stream, err := model.Stream(context.Background(), aisdk.GenerateRequest{
+		Messages:  []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("What's the weather in Paris?")}}},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+
+	events := collectStreamEvents(t, stream)
+
+	var toolCallEvents []aisdk.StreamEvent
+	for _, e := range events {
+		if e.Type == aisdk.StreamEventTypeToolCallDelta {
+			toolCallEvents = append(toolCallEvents, e)
+		}
+	}
+	if len(toolCallEvents) != 1 {
+		t.Fatalf("got %d ToolCallDelta events, want exactly 1 (Gemini's function calls arrive atomic, not incremental)", len(toolCallEvents))
+	}
+
+	event := toolCallEvents[0]
+	if event.ToolCall == nil || event.ToolCall.ID == "" {
+		t.Fatal("event.ToolCall is nil or has an empty ID")
+	}
+	if event.ToolCall.Name != "get_weather" {
+		t.Errorf("event.ToolCall.Name = %q, want %q", event.ToolCall.Name, "get_weather")
+	}
+
+	var args map[string]any
+	if err := json.Unmarshal([]byte(event.Delta), &args); err != nil {
+		t.Fatalf("event.Delta = %s, not valid JSON: %v", event.Delta, err)
+	}
+	if args["location"] != "Paris" {
+		t.Errorf("event.Delta location = %v, want %q", args["location"], "Paris")
+	}
+
+	var finish *aisdk.StreamEvent
+	for i := range events {
+		if events[i].Type == aisdk.StreamEventTypeFinish {
+			finish = &events[i]
+		}
+	}
+	if finish == nil {
+		t.Fatal("no Finish event")
+	}
+	if finish.FinishReason != aisdk.FinishReasonToolCalls {
+		t.Errorf("finish.FinishReason = %q, want %q (overridden from the raw \"STOP\")", finish.FinishReason, aisdk.FinishReasonToolCalls)
+	}
 }
