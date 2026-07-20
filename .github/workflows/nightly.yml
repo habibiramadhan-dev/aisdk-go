@@ -1,0 +1,29 @@
+name: Nightly Live Smoke Test
+
+# Deliberately NO pull_request trigger anywhere in this file — this workflow
+# uses real provider API keys via repository secrets, and a pull_request
+# workflow_run triggered by a fork could otherwise be used to exfiltrate
+# them. schedule and workflow_dispatch are both safe: neither can be
+# triggered by an external fork's PR contents.
+on:
+  schedule:
+    - cron: '0 6 * * *' # 06:00 UTC daily
+  workflow_dispatch: {}
+
+jobs:
+  live-smoke-test:
+    # Extra guard: even the scheduled/manual triggers above only make sense
+    # on the canonical repo, never a fork that happens to also have this
+    # workflow file and its own schedule trigger enabled.
+    if: github.repository == 'habibiramadhan-dev/aisdk-go'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - run: go test -tags=integration ./... -v
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
