@@ -62,7 +62,7 @@ func (m *model) Stream(ctx context.Context, req aisdk.GenerateRequest) (<-chan a
 	events := make(chan aisdk.StreamEvent)
 	go func() {
 		defer close(events)
-		defer sdkStream.Close()
+		defer func() { _ = sdkStream.Close() }()
 
 		var finishReason aisdk.FinishReason
 		var usage aisdk.Usage

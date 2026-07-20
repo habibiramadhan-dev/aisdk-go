@@ -20,7 +20,7 @@ import (
 func TestNew_ModelReturnsNonNilModel(t *testing.T) {
 	provider := openaiprovider.New("test-api-key")
 
-	var model aisdk.Model = provider.Model("gpt-4o")
+	model := provider.Model("gpt-4o")
 	if model == nil {
 		t.Fatal("Model() returned nil")
 	}
@@ -31,7 +31,7 @@ func fakeOpenAIServer(t *testing.T, status int, body string) *httptest.Server {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
-		w.Write([]byte(body))
+		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(server.Close)
 	return server
@@ -79,10 +79,10 @@ func TestModel_Generate_ReturnsTextResponse(t *testing.T) {
 func TestModel_Generate_SendsSystemPromptAsFirstMessage(t *testing.T) {
 	var capturedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&capturedBody)
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fakeSuccessResponse))
+		_, _ = w.Write([]byte(fakeSuccessResponse))
 	}))
 	t.Cleanup(server.Close)
 
@@ -169,7 +169,7 @@ func TestModel_Generate_ErrorNeverLeaksAPIKey(t *testing.T) {
 		receivedKey = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(fakeAuthErrorBody))
+		_, _ = w.Write([]byte(fakeAuthErrorBody))
 	}))
 	t.Cleanup(server.Close)
 
@@ -195,7 +195,7 @@ func fakeOpenAISSEServer(t *testing.T, sseBody string) *httptest.Server {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(sseBody))
+		_, _ = w.Write([]byte(sseBody))
 	}))
 	t.Cleanup(server.Close)
 	return server
@@ -253,10 +253,10 @@ func TestModel_Stream_ReturnsTextDeltas(t *testing.T) {
 func TestModel_Stream_RequestsIncludeUsage(t *testing.T) {
 	var capturedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&capturedBody)
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fakeStreamSSE))
+		_, _ = w.Write([]byte(fakeStreamSSE))
 	}))
 	t.Cleanup(server.Close)
 
@@ -367,7 +367,7 @@ func TestModel_Stream_StopsSendingAfterContextCancelled(t *testing.T) {
 			`data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"two"},"finish_reason":null}]}` + "\n\n",
 		}
 		for _, c := range chunks {
-			w.Write([]byte(c))
+			_, _ = w.Write([]byte(c))
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -412,10 +412,10 @@ func TestModel_Stream_StopsSendingAfterContextCancelled(t *testing.T) {
 func TestModel_Generate_SendsToolDeclarations(t *testing.T) {
 	var capturedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&capturedBody)
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fakeSuccessResponse))
+		_, _ = w.Write([]byte(fakeSuccessResponse))
 	}))
 	t.Cleanup(server.Close)
 
@@ -520,7 +520,7 @@ func TestOpenAIModel_ConformanceSuite(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte(`{"error":{"message":"fake server: failed to decode request body","type":"server_error"}}`))
+				_, _ = w.Write([]byte(`{"error":{"message":"fake server: failed to decode request body","type":"server_error"}}`))
 				return
 			}
 
@@ -531,34 +531,34 @@ func TestOpenAIModel_ConformanceSuite(t *testing.T) {
 			if streaming && len(tools) > 0 {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(fakeToolCallStreamSSE))
+				_, _ = w.Write([]byte(fakeToolCallStreamSSE))
 				return
 			}
 
 			if streaming {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(fakeStreamSSE))
+				_, _ = w.Write([]byte(fakeStreamSSE))
 				return
 			}
 
 			if len(tools) > 0 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(fakeToolCallResponse))
+				_, _ = w.Write([]byte(fakeToolCallResponse))
 				return
 			}
 
 			if len(responseFormat) > 0 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(fakeStructuredOutputResponse))
+				_, _ = w.Write([]byte(fakeStructuredOutputResponse))
 				return
 			}
 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(fakeSuccessResponse))
+			_, _ = w.Write([]byte(fakeSuccessResponse))
 		}))
 		t.Cleanup(server.Close)
 
@@ -584,10 +584,10 @@ const fakeStructuredOutputResponse = `{
 func TestModel_Generate_SendsToolCallAndResultHistory(t *testing.T) {
 	var capturedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&capturedBody)
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fakeSuccessResponse))
+		_, _ = w.Write([]byte(fakeSuccessResponse))
 	}))
 	t.Cleanup(server.Close)
 
@@ -709,10 +709,10 @@ func TestModel_Stream_EmitsToolCallDeltas(t *testing.T) {
 func TestModel_Generate_SendsResponseSchemaAsResponseFormat(t *testing.T) {
 	var capturedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&capturedBody)
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fakeSuccessResponse))
+		_, _ = w.Write([]byte(fakeSuccessResponse))
 	}))
 	t.Cleanup(server.Close)
 
@@ -764,11 +764,11 @@ func TestOpenAIModel_FallbackRecoversFromTransientError(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if attempt == 1 {
 			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(fakeRateLimitErrorBody))
+			_, _ = w.Write([]byte(fakeRateLimitErrorBody))
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fakeSuccessResponse))
+		_, _ = w.Write([]byte(fakeSuccessResponse))
 	}))
 	t.Cleanup(server.Close)
 
@@ -802,7 +802,7 @@ func TestModel_Generate_MapsRetryAfterHeader(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", "30")
 		w.WriteHeader(http.StatusTooManyRequests)
-		w.Write([]byte(fakeRateLimitErrorBody))
+		_, _ = w.Write([]byte(fakeRateLimitErrorBody))
 	}))
 	t.Cleanup(server.Close)
 

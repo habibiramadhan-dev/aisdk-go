@@ -65,7 +65,7 @@ func toGenerateContentParams(req aisdk.GenerateRequest) ([]*genaisdk.Content, *g
 				// generation time, the same trust boundary design.md §8 applies
 				// to ToolCall.Arguments generally.
 				var args map[string]any
-				json.Unmarshal(part.ToolCall.Arguments, &args)
+				_ = json.Unmarshal(part.ToolCall.Arguments, &args)
 				parts = append(parts, genaisdk.NewPartFromFunctionCall(part.ToolCall.Name, args))
 			case aisdk.ContentPartTypeToolResult:
 				response := map[string]any{"output": part.ToolResult.Content}

@@ -20,7 +20,7 @@ import (
 func TestNew_ModelReturnsNonNilModel(t *testing.T) {
 	provider := anthropicprovider.New("test-api-key")
 
-	var model aisdk.Model = provider.Model("claude-sonnet-5")
+	model := provider.Model("claude-sonnet-5")
 	if model == nil {
 		t.Fatal("Model() returned nil")
 	}
@@ -31,7 +31,7 @@ func fakeAnthropicServer(t *testing.T, status int, body string) *httptest.Server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
-		w.Write([]byte(body))
+		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(server.Close)
 	return server
@@ -80,7 +80,7 @@ func TestModel_Generate_SendsSystemPromptAtTopLevel(t *testing.T) {
 		decodeErr = json.NewDecoder(r.Body).Decode(&capturedBody)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fakeSuccessResponse))
+		_, _ = w.Write([]byte(fakeSuccessResponse))
 	}))
 	t.Cleanup(server.Close)
 
@@ -176,7 +176,7 @@ func TestModel_Generate_ErrorNeverLeaksAPIKey(t *testing.T) {
 		receivedKey = r.Header.Get("X-Api-Key")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(fakeAuthErrorResponse))
+		_, _ = w.Write([]byte(fakeAuthErrorResponse))
 	}))
 	t.Cleanup(server.Close)
 
@@ -202,10 +202,10 @@ func TestModel_Generate_ErrorNeverLeaksAPIKey(t *testing.T) {
 func TestModel_Generate_SendsToolDeclarations(t *testing.T) {
 	var capturedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&capturedBody)
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fakeSuccessResponse))
+		_, _ = w.Write([]byte(fakeSuccessResponse))
 	}))
 	t.Cleanup(server.Close)
 
@@ -298,10 +298,10 @@ func TestModel_Generate_ReturnsToolCall(t *testing.T) {
 func TestModel_Generate_SendsToolCallAndResultHistory(t *testing.T) {
 	var capturedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&capturedBody)
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fakeSuccessResponse))
+		_, _ = w.Write([]byte(fakeSuccessResponse))
 	}))
 	t.Cleanup(server.Close)
 
@@ -370,34 +370,34 @@ func TestAnthropicModel_ConformanceSuite(t *testing.T) {
 				// silently defaulting to the non-streaming branch below.
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte(`{"type":"error","error":{"type":"api_error","message":"fake server: failed to decode request body"}}`))
+				_, _ = w.Write([]byte(`{"type":"error","error":{"type":"api_error","message":"fake server: failed to decode request body"}}`))
 				return
 			}
 
 			if streaming, _ := body["stream"].(bool); streaming {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(fakeStreamSSE))
+				_, _ = w.Write([]byte(fakeStreamSSE))
 				return
 			}
 
 			if tools, _ := body["tools"].([]any); len(tools) > 0 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(fakeToolCallResponse))
+				_, _ = w.Write([]byte(fakeToolCallResponse))
 				return
 			}
 
 			if outputConfig, _ := body["output_config"].(map[string]any); len(outputConfig) > 0 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(fakeStructuredOutputResponse))
+				_, _ = w.Write([]byte(fakeStructuredOutputResponse))
 				return
 			}
 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(fakeSuccessResponse))
+			_, _ = w.Write([]byte(fakeSuccessResponse))
 		}))
 		t.Cleanup(server.Close)
 
@@ -422,7 +422,7 @@ func fakeAnthropicSSEServer(t *testing.T, sseBody string) *httptest.Server {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(sseBody))
+		_, _ = w.Write([]byte(sseBody))
 	}))
 	t.Cleanup(server.Close)
 	return server
@@ -702,7 +702,7 @@ func TestModel_Stream_StopsSendingAfterContextCancelled(t *testing.T) {
 			`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"two"}}` + "\n\n",
 		}
 		for _, e := range events {
-			w.Write([]byte(e))
+			_, _ = w.Write([]byte(e))
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -752,7 +752,7 @@ func TestModel_Generate_MapsRetryAfterHeader(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", "30")
 		w.WriteHeader(http.StatusTooManyRequests)
-		w.Write([]byte(fakeRateLimitResponse))
+		_, _ = w.Write([]byte(fakeRateLimitResponse))
 	}))
 	t.Cleanup(server.Close)
 
@@ -788,11 +788,11 @@ func TestAnthropicModel_FallbackRecoversFromTransientError(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if attempt == 1 {
 			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(fakeRateLimitResponse))
+			_, _ = w.Write([]byte(fakeRateLimitResponse))
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fakeSuccessResponse))
+		_, _ = w.Write([]byte(fakeSuccessResponse))
 	}))
 	t.Cleanup(server.Close)
 
@@ -824,10 +824,10 @@ func TestAnthropicModel_FallbackRecoversFromTransientError(t *testing.T) {
 func TestModel_Generate_SendsResponseSchemaAsOutputConfig(t *testing.T) {
 	var capturedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&capturedBody)
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fakeSuccessResponse))
+		_, _ = w.Write([]byte(fakeSuccessResponse))
 	}))
 	t.Cleanup(server.Close)
 

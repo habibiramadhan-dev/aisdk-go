@@ -42,7 +42,7 @@ func newTestTracerProvider() (*sdktrace.TracerProvider, *tracetest.InMemoryExpor
 
 func TestWrap_Generate_RecordsGenAIAttributes(t *testing.T) {
 	tp, exporter := newTestTracerProvider()
-	defer tp.Shutdown(context.Background())
+	defer func() { _ = tp.Shutdown(context.Background()) }()
 
 	inner := &fakeModel{
 		provider:  "anthropic",
@@ -84,7 +84,7 @@ func TestWrap_Generate_RecordsGenAIAttributes(t *testing.T) {
 
 func TestWrap_Generate_RecordsErrorOnFailure(t *testing.T) {
 	tp, exporter := newTestTracerProvider()
-	defer tp.Shutdown(context.Background())
+	defer func() { _ = tp.Shutdown(context.Background()) }()
 
 	wantErr := &aisdk.Error{Provider: "anthropic", Code: aisdk.ErrorCodeAuthFailed, Retryable: false}
 	inner := &fakeModel{provider: "anthropic", modelName: "claude-sonnet-5", err: wantErr}
@@ -109,7 +109,7 @@ func TestWrap_Generate_RecordsErrorOnFailure(t *testing.T) {
 
 func TestWrap_Generate_NoModelInfo_FallsBackToGenericSpanName(t *testing.T) {
 	tp, exporter := newTestTracerProvider()
-	defer tp.Shutdown(context.Background())
+	defer func() { _ = tp.Shutdown(context.Background()) }()
 
 	// modelWithoutInfo does NOT implement aisdk.ModelInfo.
 	inner := &modelWithoutInfo{resp: aisdk.GenerateResponse{FinishReason: aisdk.FinishReasonStop}}
@@ -158,7 +158,7 @@ func TestWrap_Generate_CapturesContentOnlyWhenOptedIn(t *testing.T) {
 
 	t.Run("without WithCaptureContent", func(t *testing.T) {
 		tp, exporter := newTestTracerProvider()
-		defer tp.Shutdown(context.Background())
+		defer func() { _ = tp.Shutdown(context.Background()) }()
 		model := aisdkotel.Wrap(inner, aisdkotel.WithTracerProvider(tp))
 		if _, err := model.Generate(context.Background(), req); err != nil {
 			t.Fatalf("Generate returned error: %v", err)
@@ -172,7 +172,7 @@ func TestWrap_Generate_CapturesContentOnlyWhenOptedIn(t *testing.T) {
 
 	t.Run("with WithCaptureContent", func(t *testing.T) {
 		tp, exporter := newTestTracerProvider()
-		defer tp.Shutdown(context.Background())
+		defer func() { _ = tp.Shutdown(context.Background()) }()
 		model := aisdkotel.Wrap(inner, aisdkotel.WithTracerProvider(tp), aisdkotel.WithCaptureContent())
 		if _, err := model.Generate(context.Background(), req); err != nil {
 			t.Fatalf("Generate returned error: %v", err)
@@ -189,7 +189,7 @@ func TestWrap_Generate_CapturesContentOnlyWhenOptedIn(t *testing.T) {
 
 func TestWrap_Stream_ClosesSpanOnFinishWithUsage(t *testing.T) {
 	tp, exporter := newTestTracerProvider()
-	defer tp.Shutdown(context.Background())
+	defer func() { _ = tp.Shutdown(context.Background()) }()
 
 	inner := &streamingFakeModel{
 		provider:  "openai",
@@ -234,7 +234,7 @@ func TestWrap_Stream_ClosesSpanOnFinishWithUsage(t *testing.T) {
 
 func TestWrap_Stream_RecordsErrorEvent(t *testing.T) {
 	tp, exporter := newTestTracerProvider()
-	defer tp.Shutdown(context.Background())
+	defer func() { _ = tp.Shutdown(context.Background()) }()
 
 	streamErr := &aisdk.Error{Provider: "openai", Code: aisdk.ErrorCodeServerError, Retryable: true}
 	inner := &streamingFakeModel{
@@ -264,7 +264,7 @@ func TestWrap_Stream_RecordsErrorEvent(t *testing.T) {
 
 func TestWrap_Stream_ConnectionErrorRecordsAndEndsSpanImmediately(t *testing.T) {
 	tp, exporter := newTestTracerProvider()
-	defer tp.Shutdown(context.Background())
+	defer func() { _ = tp.Shutdown(context.Background()) }()
 
 	connErr := &aisdk.Error{Provider: "openai", Code: aisdk.ErrorCodeAuthFailed, Retryable: false}
 	inner := &streamingFakeModel{provider: "openai", modelName: "gpt-4o", connectErr: connErr}
@@ -296,7 +296,7 @@ func TestWrap_Stream_CapturesAccumulatedTextOnlyWhenOptedIn(t *testing.T) {
 	}
 
 	tp, exporter := newTestTracerProvider()
-	defer tp.Shutdown(context.Background())
+	defer func() { _ = tp.Shutdown(context.Background()) }()
 	model := aisdkotel.Wrap(inner, aisdkotel.WithTracerProvider(tp), aisdkotel.WithCaptureContent())
 
 	stream, err := model.Stream(context.Background(), aisdk.GenerateRequest{})
@@ -348,7 +348,7 @@ func (m *streamingFakeModel) Stream(ctx context.Context, req aisdk.GenerateReque
 
 func TestWrap_ComposesWithFallback_RecordsNestedFallbackEvents(t *testing.T) {
 	tp, exporter := newTestTracerProvider()
-	defer tp.Shutdown(context.Background())
+	defer func() { _ = tp.Shutdown(context.Background()) }()
 
 	m1 := &fakeModel{
 		provider:  "anthropic",

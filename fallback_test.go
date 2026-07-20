@@ -313,7 +313,7 @@ func TestFallback_Stream_DoesNotInterceptMidStreamErrors(t *testing.T) {
 func TestFallback_RecordsSpanEventForRetry(t *testing.T) {
 	exporter := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
-	defer tp.Shutdown(context.Background())
+	defer func() { _ = tp.Shutdown(context.Background()) }()
 	tracer := tp.Tracer("test")
 
 	m1 := &countingModel{

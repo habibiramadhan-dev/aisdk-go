@@ -113,7 +113,7 @@ func toToolUnionParams(tools []aisdk.Tool) []openaisdk.ChatCompletionToolUnionPa
 		// and schema validation is the caller's responsibility, the same
 		// trust boundary design.md §8 already applies to ToolCall.Arguments.
 		var parameters openaisdk.FunctionParameters
-		json.Unmarshal(t.Parameters, &parameters)
+		_ = json.Unmarshal(t.Parameters, &parameters)
 
 		result = append(result, openaisdk.ChatCompletionFunctionTool(openaisdk.FunctionDefinitionParam{
 			Name:        t.Name,

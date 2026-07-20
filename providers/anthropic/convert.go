@@ -34,7 +34,7 @@ func toMessageNewParams(modelName string, req aisdk.GenerateRequest) anthropicsd
 		// unmarshal: req.ResponseSchema always comes from internal/schema's
 		// own reflection output in practice, which is always valid JSON.
 		var schemaMap map[string]any
-		json.Unmarshal(req.ResponseSchema, &schemaMap)
+		_ = json.Unmarshal(req.ResponseSchema, &schemaMap)
 		params.OutputConfig = anthropicsdk.OutputConfigParam{
 			Format: anthropicsdk.JSONOutputFormatParam{Schema: schemaMap},
 		}
@@ -83,7 +83,7 @@ func toToolUnionParams(tools []aisdk.Tool) []anthropicsdk.ToolUnionParam {
 		// Errors are ignored (best-effort) — t.Parameters is caller-supplied
 		// and schema validation is the caller's responsibility, the same
 		// trust boundary design.md §8 already applies to ToolCall.Arguments.
-		json.Unmarshal(t.Parameters, &schema)
+		_ = json.Unmarshal(t.Parameters, &schema)
 
 		result = append(result, anthropicsdk.ToolUnionParam{
 			OfTool: &anthropicsdk.ToolParam{

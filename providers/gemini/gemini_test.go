@@ -24,7 +24,7 @@ func TestNew_ModelReturnsNonNilModel(t *testing.T) {
 		t.Fatalf("New returned error: %v", err)
 	}
 
-	var model aisdk.Model = provider.Model("gemini-2.0-flash")
+	model := provider.Model("gemini-2.0-flash")
 	if model == nil {
 		t.Fatal("Model() returned nil")
 	}
@@ -35,7 +35,7 @@ func fakeGeminiServer(t *testing.T, status int, body string) *httptest.Server {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
-		w.Write([]byte(body))
+		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(server.Close)
 	return server
@@ -93,10 +93,10 @@ func TestModel_Generate_ReturnsTextResponse(t *testing.T) {
 func TestModel_Generate_SendsSystemPromptAsSystemInstruction(t *testing.T) {
 	var capturedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&capturedBody)
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fakeSuccessResponse))
+		_, _ = w.Write([]byte(fakeSuccessResponse))
 	}))
 	t.Cleanup(server.Close)
 
@@ -191,7 +191,7 @@ func TestModel_Generate_ErrorNeverLeaksAPIKey(t *testing.T) {
 		receivedKey = r.Header.Get("x-goog-api-key")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(fakeAuthErrorBody))
+		_, _ = w.Write([]byte(fakeAuthErrorBody))
 	}))
 	t.Cleanup(server.Close)
 
@@ -222,7 +222,7 @@ func fakeGeminiSSEServer(t *testing.T, sseBody string) *httptest.Server {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(sseBody))
+		_, _ = w.Write([]byte(sseBody))
 	}))
 	t.Cleanup(server.Close)
 	return server
@@ -317,7 +317,7 @@ func TestModel_Stream_EmitsErrorEventOnStreamFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error":{"code":500,"message":"The server had an error processing your request","status":"INTERNAL"}}`))
+		_, _ = w.Write([]byte(`{"error":{"code":500,"message":"The server had an error processing your request","status":"INTERNAL"}}`))
 	}))
 	t.Cleanup(server.Close)
 
@@ -363,7 +363,7 @@ func TestModel_Stream_StopsSendingAfterContextCancelled(t *testing.T) {
 			`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"two"}]},"index":0}]}` + "\n\n",
 		}
 		for _, c := range chunks {
-			w.Write([]byte(c))
+			_, _ = w.Write([]byte(c))
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -408,10 +408,10 @@ func TestModel_Stream_StopsSendingAfterContextCancelled(t *testing.T) {
 func TestModel_Generate_SendsToolDeclarations(t *testing.T) {
 	var capturedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&capturedBody)
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fakeSuccessResponse))
+		_, _ = w.Write([]byte(fakeSuccessResponse))
 	}))
 	t.Cleanup(server.Close)
 
@@ -518,7 +518,7 @@ func TestGeminiModel_ConformanceSuite(t *testing.T) {
 	aisdktest.RunConformanceSuite(t, func(t *testing.T) aisdk.Model {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var body map[string]any
-			json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewDecoder(r.Body).Decode(&body)
 			tools, _ := body["tools"].([]any)
 			generationConfig, _ := body["generationConfig"].(map[string]any)
 			hasResponseSchema := len(generationConfig) > 0 && generationConfig["responseJsonSchema"] != nil
@@ -527,24 +527,24 @@ func TestGeminiModel_ConformanceSuite(t *testing.T) {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.WriteHeader(http.StatusOK)
 				if len(tools) > 0 {
-					w.Write([]byte(fakeToolCallStreamSSE))
+					_, _ = w.Write([]byte(fakeToolCallStreamSSE))
 					return
 				}
-				w.Write([]byte(fakeStreamSSE))
+				_, _ = w.Write([]byte(fakeStreamSSE))
 				return
 			}
 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			if len(tools) > 0 {
-				w.Write([]byte(fakeToolCallResponse))
+				_, _ = w.Write([]byte(fakeToolCallResponse))
 				return
 			}
 			if hasResponseSchema {
-				w.Write([]byte(fakeStructuredOutputResponse))
+				_, _ = w.Write([]byte(fakeStructuredOutputResponse))
 				return
 			}
-			w.Write([]byte(fakeSuccessResponse))
+			_, _ = w.Write([]byte(fakeSuccessResponse))
 		}))
 		t.Cleanup(server.Close)
 
@@ -570,10 +570,10 @@ const fakeStructuredOutputResponse = `{
 func TestModel_Generate_SendsToolCallAndResultHistory(t *testing.T) {
 	var capturedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&capturedBody)
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fakeSuccessResponse))
+		_, _ = w.Write([]byte(fakeSuccessResponse))
 	}))
 	t.Cleanup(server.Close)
 
@@ -714,11 +714,11 @@ func TestGeminiModel_FallbackRecoversFromTransientError(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if attempt == 1 {
 			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(fakeRateLimitErrorBody))
+			_, _ = w.Write([]byte(fakeRateLimitErrorBody))
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fakeSuccessResponse))
+		_, _ = w.Write([]byte(fakeSuccessResponse))
 	}))
 	t.Cleanup(server.Close)
 
@@ -750,10 +750,10 @@ func TestGeminiModel_FallbackRecoversFromTransientError(t *testing.T) {
 func TestModel_Generate_SendsResponseSchemaAsResponseJsonSchema(t *testing.T) {
 	var capturedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&capturedBody)
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fakeSuccessResponse))
+		_, _ = w.Write([]byte(fakeSuccessResponse))
 	}))
 	t.Cleanup(server.Close)
 
