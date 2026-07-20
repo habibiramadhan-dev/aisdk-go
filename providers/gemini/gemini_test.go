@@ -520,6 +520,8 @@ func TestGeminiModel_ConformanceSuite(t *testing.T) {
 			var body map[string]any
 			json.NewDecoder(r.Body).Decode(&body)
 			tools, _ := body["tools"].([]any)
+			generationConfig, _ := body["generationConfig"].(map[string]any)
+			hasResponseSchema := len(generationConfig) > 0 && generationConfig["responseJsonSchema"] != nil
 
 			if strings.Contains(r.URL.Path, "streamGenerateContent") {
 				w.Header().Set("Content-Type", "text/event-stream")
@@ -538,6 +540,10 @@ func TestGeminiModel_ConformanceSuite(t *testing.T) {
 				w.Write([]byte(fakeToolCallResponse))
 				return
 			}
+			if hasResponseSchema {
+				w.Write([]byte(fakeStructuredOutputResponse))
+				return
+			}
 			w.Write([]byte(fakeSuccessResponse))
 		}))
 		t.Cleanup(server.Close)
@@ -546,6 +552,20 @@ func TestGeminiModel_ConformanceSuite(t *testing.T) {
 		return provider.Model("gemini-2.0-flash")
 	})
 }
+
+const fakeStructuredOutputResponse = `{
+  "candidates": [{
+    "content": {"role": "model", "parts": [{"text": "{\"city\":\"Paris\",\"temperature_c\":18.5}"}]},
+    "finishReason": "STOP",
+    "index": 0
+  }],
+  "usageMetadata": {
+    "promptTokenCount": 10,
+    "candidatesTokenCount": 5,
+    "totalTokenCount": 15
+  },
+  "modelVersion": "gemini-2.0-flash"
+}`
 
 func TestModel_Generate_SendsToolCallAndResultHistory(t *testing.T) {
 	var capturedBody map[string]any
@@ -676,5 +696,47 @@ func TestModel_Stream_EmitsToolCallDeltas(t *testing.T) {
 	}
 	if finish.FinishReason != aisdk.FinishReasonToolCalls {
 		t.Errorf("finish.FinishReason = %q, want %q (overridden from the raw \"STOP\")", finish.FinishReason, aisdk.FinishReasonToolCalls)
+	}
+}
+
+func TestModel_Generate_SendsResponseSchemaAsResponseJsonSchema(t *testing.T) {
+	var capturedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fakeSuccessResponse))
+	}))
+	t.Cleanup(server.Close)
+
+	provider := newTestProvider(t, server)
+	model := provider.Model("gemini-2.0-flash")
+
+	_, err := model.Generate(context.Background(), aisdk.GenerateRequest{
+		Messages:       []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("Describe Paris.")}}},
+		ResponseSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}`),
+		MaxTokens:      64,
+	})
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+
+	// responseMimeType/responseJsonSchema are generation-config fields — the
+	// genai SDK nests the whole GenerateContentConfig under "generationConfig"
+	// in the wire body (unlike "tools" or "systemInstruction", which are
+	// top-level), confirmed by inspecting the captured request body directly.
+	genConfig, ok := capturedBody["generationConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("request body generationConfig = %+v, want an object", capturedBody["generationConfig"])
+	}
+	if genConfig["responseMimeType"] != "application/json" {
+		t.Errorf("generationConfig.responseMimeType = %v, want %q", genConfig["responseMimeType"], "application/json")
+	}
+	schema, ok := genConfig["responseJsonSchema"].(map[string]any)
+	if !ok {
+		t.Fatalf("generationConfig.responseJsonSchema = %+v, want an object", genConfig["responseJsonSchema"])
+	}
+	if _, ok := schema["properties"].(map[string]any)["city"]; !ok {
+		t.Errorf("responseJsonSchema.properties = %+v, want a %q key", schema["properties"], "city")
 	}
 }

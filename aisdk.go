@@ -84,9 +84,14 @@ type GenerateRequest struct {
 	// System is the system prompt/instruction. Never a Message with a system
 	// role — Anthropic and Gemini both expose this as a dedicated top-level
 	// field natively; the OpenAI adapter folds it into Messages itself.
-	System          string
-	Messages        []Message
-	Tools           []Tool
+	System   string
+	Messages []Message
+	Tools    []Tool
+	// ResponseSchema, when set, constrains the response to valid JSON
+	// matching this JSON Schema document. Callers normally don't set this
+	// directly — GenerateStructured (structured.go) sets it after
+	// reflecting a Go type via internal/schema.
+	ResponseSchema  json.RawMessage
 	MaxTokens       int
 	Temperature     float64
 	ProviderOptions map[string]any

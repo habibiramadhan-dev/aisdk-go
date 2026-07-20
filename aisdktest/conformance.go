@@ -104,4 +104,28 @@ func RunConformanceSuite(t *testing.T, newModel func(t *testing.T) aisdk.Model) 
 			t.Errorf("resp.FinishReason = %q, want %q", resp.FinishReason, aisdk.FinishReasonToolCalls)
 		}
 	})
+
+	t.Run("GenerateStructured_ReturnsTypedResult", func(t *testing.T) {
+		model := newModel(t)
+
+		type weatherReport struct {
+			City         string  `json:"city"`
+			TemperatureC float64 `json:"temperature_c"`
+		}
+
+		result, err := aisdk.GenerateStructured[weatherReport](context.Background(), model, aisdk.GenerateRequest{
+			Messages:  []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("What's the weather in Paris?")}}},
+			MaxTokens: 64,
+		})
+		if err != nil {
+			t.Fatalf("GenerateStructured returned error: %v", err)
+		}
+
+		if result.City == "" {
+			t.Error("result.City is empty")
+		}
+		if result.TemperatureC == 0 {
+			t.Error("result.TemperatureC is zero — likely didn't parse correctly")
+		}
+	})
 }

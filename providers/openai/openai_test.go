@@ -526,6 +526,7 @@ func TestOpenAIModel_ConformanceSuite(t *testing.T) {
 
 			streaming, _ := body["stream"].(bool)
 			tools, _ := body["tools"].([]any)
+			responseFormat, _ := body["response_format"].(map[string]any)
 
 			if streaming && len(tools) > 0 {
 				w.Header().Set("Content-Type", "text/event-stream")
@@ -548,6 +549,13 @@ func TestOpenAIModel_ConformanceSuite(t *testing.T) {
 				return
 			}
 
+			if len(responseFormat) > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(fakeStructuredOutputResponse))
+				return
+			}
+
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(fakeSuccessResponse))
@@ -558,6 +566,20 @@ func TestOpenAIModel_ConformanceSuite(t *testing.T) {
 		return provider.Model("gpt-4o")
 	})
 }
+
+const fakeStructuredOutputResponse = `{
+  "id": "chatcmpl_test_structured",
+  "object": "chat.completion",
+  "created": 1700000000,
+  "model": "gpt-4o",
+  "choices": [{
+    "index": 0,
+    "message": {"role": "assistant", "content": "{\"city\":\"Paris\",\"temperature_c\":18.5}", "refusal": null},
+    "finish_reason": "stop",
+    "logprobs": null
+  }],
+  "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+}`
 
 func TestModel_Generate_SendsToolCallAndResultHistory(t *testing.T) {
 	var capturedBody map[string]any
@@ -681,5 +703,47 @@ func TestModel_Stream_EmitsToolCallDeltas(t *testing.T) {
 	}
 	if finish.FinishReason != aisdk.FinishReasonToolCalls {
 		t.Errorf("finish.FinishReason = %q, want %q", finish.FinishReason, aisdk.FinishReasonToolCalls)
+	}
+}
+
+func TestModel_Generate_SendsResponseSchemaAsResponseFormat(t *testing.T) {
+	var capturedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fakeSuccessResponse))
+	}))
+	t.Cleanup(server.Close)
+
+	provider := openaiprovider.New("test-api-key", option.WithBaseURL(server.URL))
+	model := provider.Model("gpt-4o")
+
+	_, err := model.Generate(context.Background(), aisdk.GenerateRequest{
+		Messages:       []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("Describe Paris.")}}},
+		ResponseSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}`),
+		MaxTokens:      64,
+	})
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+
+	responseFormat, ok := capturedBody["response_format"].(map[string]any)
+	if !ok || responseFormat["type"] != "json_schema" {
+		t.Fatalf("request body response_format = %+v, want type %q", capturedBody["response_format"], "json_schema")
+	}
+	jsonSchema, ok := responseFormat["json_schema"].(map[string]any)
+	if !ok {
+		t.Fatalf("response_format.json_schema = %+v, want an object", responseFormat["json_schema"])
+	}
+	if jsonSchema["strict"] != true {
+		t.Errorf("response_format.json_schema.strict = %v, want true", jsonSchema["strict"])
+	}
+	schema, ok := jsonSchema["schema"].(map[string]any)
+	if !ok {
+		t.Fatalf("response_format.json_schema.schema = %+v, want an object", jsonSchema["schema"])
+	}
+	if _, ok := schema["properties"].(map[string]any)["city"]; !ok {
+		t.Errorf("response_format.json_schema.schema.properties = %+v, want a %q key", schema["properties"], "city")
 	}
 }

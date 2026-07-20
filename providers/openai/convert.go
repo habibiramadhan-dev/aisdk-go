@@ -84,6 +84,20 @@ func toChatCompletionParams(modelName string, req aisdk.GenerateRequest) openais
 		params.Temperature = openaisdk.Float(req.Temperature)
 	}
 	params.Tools = toToolUnionParams(req.Tools)
+	if req.ResponseSchema != nil {
+		params.ResponseFormat = openaisdk.ChatCompletionNewParamsResponseFormatUnion{
+			OfJSONSchema: &openaisdk.ResponseFormatJSONSchemaParam{
+				JSONSchema: openaisdk.ResponseFormatJSONSchemaJSONSchemaParam{
+					// "response" is a fixed name — aisdk's GenerateStructured
+					// has no caller-facing concept of naming the schema, and
+					// OpenAI requires *some* name here regardless.
+					Name:   "response",
+					Schema: req.ResponseSchema,
+					Strict: openaisdk.Bool(true),
+				},
+			},
+		}
+	}
 	return params
 }
 

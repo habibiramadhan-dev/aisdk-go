@@ -388,6 +388,13 @@ func TestAnthropicModel_ConformanceSuite(t *testing.T) {
 				return
 			}
 
+			if outputConfig, _ := body["output_config"].(map[string]any); len(outputConfig) > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(fakeStructuredOutputResponse))
+				return
+			}
+
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(fakeSuccessResponse))
@@ -398,6 +405,17 @@ func TestAnthropicModel_ConformanceSuite(t *testing.T) {
 		return provider.Model("claude-sonnet-5")
 	})
 }
+
+const fakeStructuredOutputResponse = `{
+  "id": "msg_test_structured",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-5",
+  "content": [{"type": "text", "text": "{\"city\":\"Paris\",\"temperature_c\":18.5}"}],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {"input_tokens": 10, "output_tokens": 5}
+}`
 
 func fakeAnthropicSSEServer(t *testing.T, sseBody string) *httptest.Server {
 	t.Helper()
@@ -726,5 +744,44 @@ func TestModel_Stream_StopsSendingAfterContextCancelled(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("stream channel was not closed within 2s of context cancellation — goroutine leak")
+	}
+}
+
+func TestModel_Generate_SendsResponseSchemaAsOutputConfig(t *testing.T) {
+	var capturedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fakeSuccessResponse))
+	}))
+	t.Cleanup(server.Close)
+
+	provider := anthropicprovider.New("test-api-key", option.WithBaseURL(server.URL))
+	model := provider.Model("claude-sonnet-5")
+
+	_, err := model.Generate(context.Background(), aisdk.GenerateRequest{
+		Messages:       []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("Describe Paris.")}}},
+		ResponseSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}`),
+		MaxTokens:      64,
+	})
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+
+	outputConfig, ok := capturedBody["output_config"].(map[string]any)
+	if !ok {
+		t.Fatalf("request body output_config = %+v, want an object", capturedBody["output_config"])
+	}
+	format, ok := outputConfig["format"].(map[string]any)
+	if !ok {
+		t.Fatalf("output_config.format = %+v, want an object", outputConfig["format"])
+	}
+	schema, ok := format["schema"].(map[string]any)
+	if !ok {
+		t.Fatalf("output_config.format.schema = %+v, want an object", format["schema"])
+	}
+	if _, ok := schema["properties"].(map[string]any)["city"]; !ok {
+		t.Errorf("output_config.format.schema.properties = %+v, want a %q key", schema["properties"], "city")
 	}
 }

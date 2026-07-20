@@ -111,6 +111,10 @@ func toGenerateContentParams(req aisdk.GenerateRequest) ([]*genaisdk.Content, *g
 		config.Temperature = &temp
 	}
 	config.Tools = toTools(req.Tools)
+	if req.ResponseSchema != nil {
+		config.ResponseMIMEType = "application/json"
+		config.ResponseJsonSchema = req.ResponseSchema
+	}
 	return contents, config
 }
 

@@ -24,6 +24,20 @@ func toMessageNewParams(modelName string, req aisdk.GenerateRequest) anthropicsd
 	}
 	params.Tools = toToolUnionParams(req.Tools)
 
+	if req.ResponseSchema != nil {
+		// Anthropic's non-beta OutputConfig.Format.Schema wants a plain
+		// map[string]any, not a raw-passthrough any/json.RawMessage — unlike
+		// this same adapter's OWN tool-declaration schema handling, and
+		// unlike OpenAI's/Gemini's structured-output fields. Best-effort
+		// unmarshal: req.ResponseSchema always comes from internal/schema's
+		// own reflection output in practice, which is always valid JSON.
+		var schemaMap map[string]any
+		json.Unmarshal(req.ResponseSchema, &schemaMap)
+		params.OutputConfig = anthropicsdk.OutputConfigParam{
+			Format: anthropicsdk.JSONOutputFormatParam{Schema: schemaMap},
+		}
+	}
+
 	for _, msg := range req.Messages {
 		blocks := make([]anthropicsdk.ContentBlockParamUnion, 0, len(msg.Parts))
 		for _, part := range msg.Parts {
