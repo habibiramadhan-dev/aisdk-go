@@ -747,6 +747,80 @@ func TestModel_Stream_StopsSendingAfterContextCancelled(t *testing.T) {
 	}
 }
 
+func TestModel_Generate_MapsRetryAfterHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(fakeRateLimitResponse))
+	}))
+	t.Cleanup(server.Close)
+
+	provider := anthropicprovider.New("test-api-key", option.WithBaseURL(server.URL), option.WithMaxRetries(0))
+	model := provider.Model("claude-sonnet-5")
+
+	_, err := model.Generate(context.Background(), aisdk.GenerateRequest{
+		Messages: []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("hi")}}},
+	})
+
+	var aisdkErr *aisdk.Error
+	if !errors.As(err, &aisdkErr) {
+		t.Fatalf("Generate error = %v, want it to unwrap to *aisdk.Error", err)
+	}
+	if aisdkErr.RetryAfter != 30*time.Second {
+		t.Errorf("aisdkErr.RetryAfter = %v, want 30s", aisdkErr.RetryAfter)
+	}
+}
+
+// TestAnthropicModel_FallbackRecoversFromTransientError proves design.md
+// §10 Fase 6's exit criterion against a real anthropic-sdk-go-backed Model
+// wrapped in a real aisdk.Fallback: a simulated 429 outage on the first
+// request is retried (per Fallback's own retry/backoff policy) and recovers
+// on the second. option.WithMaxRetries(0) disables the anthropic-sdk-go
+// client's own built-in retry so only Fallback's retry logic is exercised —
+// otherwise the SDK would also silently retry internally before mapError/
+// Fallback ever saw the first failure, making the request-count assertion
+// below meaningless.
+func TestAnthropicModel_FallbackRecoversFromTransientError(t *testing.T) {
+	var attempt int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		w.Header().Set("Content-Type", "application/json")
+		if attempt == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(fakeRateLimitResponse))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fakeSuccessResponse))
+	}))
+	t.Cleanup(server.Close)
+
+	provider := anthropicprovider.New("test-api-key", option.WithBaseURL(server.URL), option.WithMaxRetries(0))
+	model := aisdk.Fallback([]aisdk.Model{provider.Model("claude-sonnet-5")}, aisdk.WithMaxRetries(2), aisdk.WithBackoff(func(attempt int) time.Duration { return time.Millisecond }))
+
+	resp, err := model.Generate(context.Background(), aisdk.GenerateRequest{
+		Messages:  []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("hi")}}},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	if attempt != 2 {
+		t.Errorf("server saw %d requests, want 2 (1 failed + 1 recovered)", attempt)
+	}
+
+	var text string
+	for _, part := range resp.Message.Parts {
+		if part.Type == aisdk.ContentPartTypeText {
+			text += part.Text
+		}
+	}
+	if text == "" {
+		t.Error("Generate returned no text content after recovering from the simulated 429")
+	}
+}
+
 func TestModel_Generate_SendsResponseSchemaAsOutputConfig(t *testing.T) {
 	var capturedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -783,5 +857,21 @@ func TestModel_Generate_SendsResponseSchemaAsOutputConfig(t *testing.T) {
 	}
 	if _, ok := schema["properties"].(map[string]any)["city"]; !ok {
 		t.Errorf("output_config.format.schema.properties = %+v, want a %q key", schema["properties"], "city")
+	}
+}
+
+func TestModel_ImplementsModelInfo(t *testing.T) {
+	provider := anthropicprovider.New("test-api-key")
+	model := provider.Model("claude-sonnet-5")
+
+	mi, ok := model.(aisdk.ModelInfo)
+	if !ok {
+		t.Fatal("model does not implement aisdk.ModelInfo")
+	}
+	if mi.Provider() != "anthropic" {
+		t.Errorf("mi.Provider() = %q, want %q", mi.Provider(), "anthropic")
+	}
+	if mi.ModelName() != "claude-sonnet-5" {
+		t.Errorf("mi.ModelName() = %q, want %q", mi.ModelName(), "claude-sonnet-5")
 	}
 }

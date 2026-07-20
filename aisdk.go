@@ -17,6 +17,22 @@ type Model interface {
 	Stream(ctx context.Context, req GenerateRequest) (<-chan StreamEvent, error)
 }
 
+// ModelInfo is an optional interface a Model MAY implement to expose its
+// provider/model identity for introspection. It is deliberately NOT part of
+// the required Model interface — a test fake, or a decorator composing
+// multiple providers (like Fallback), has no single meaningful answer to
+// "what provider/model is this." otel.Wrap uses this (via a type assertion,
+// gracefully degrading when absent) to populate GenAI semantic convention
+// attributes (gen_ai.system, gen_ai.request.model) — but this interface
+// itself has no otel dependency; it's a general-purpose introspection hook
+// any code can use.
+type ModelInfo interface {
+	// Provider returns the provider name (e.g. "anthropic", "openai", "gemini").
+	Provider() string
+	// ModelName returns the specific model name (e.g. "claude-sonnet-5").
+	ModelName() string
+}
+
 // Role identifies who sent a Message. There is no "system" role — see
 // GenerateRequest.System.
 type Role string

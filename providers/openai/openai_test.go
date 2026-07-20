@@ -747,3 +747,101 @@ func TestModel_Generate_SendsResponseSchemaAsResponseFormat(t *testing.T) {
 		t.Errorf("response_format.json_schema.schema.properties = %+v, want a %q key", schema["properties"], "city")
 	}
 }
+
+// TestOpenAIModel_FallbackRecoversFromTransientError proves design.md §10
+// Fase 6's exit criterion against a real openai-go-backed Model wrapped in a
+// real aisdk.Fallback: a simulated 429 outage on the first request is
+// retried (per Fallback's own retry/backoff policy) and recovers on the
+// second. option.WithMaxRetries(0) disables the openai-go client's own
+// built-in retry so only Fallback's retry logic is exercised — otherwise the
+// SDK would also silently retry internally before mapError/Fallback ever
+// saw the first failure, making the request-count assertion below
+// meaningless.
+func TestOpenAIModel_FallbackRecoversFromTransientError(t *testing.T) {
+	var attempt int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		w.Header().Set("Content-Type", "application/json")
+		if attempt == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(fakeRateLimitErrorBody))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fakeSuccessResponse))
+	}))
+	t.Cleanup(server.Close)
+
+	provider := openaiprovider.New("test-api-key", option.WithBaseURL(server.URL), option.WithMaxRetries(0))
+	model := aisdk.Fallback([]aisdk.Model{provider.Model("gpt-4o")}, aisdk.WithMaxRetries(2), aisdk.WithBackoff(func(attempt int) time.Duration { return time.Millisecond }))
+
+	resp, err := model.Generate(context.Background(), aisdk.GenerateRequest{
+		Messages:  []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("hi")}}},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	if attempt != 2 {
+		t.Errorf("server saw %d requests, want 2 (1 failed + 1 recovered)", attempt)
+	}
+
+	var text string
+	for _, part := range resp.Message.Parts {
+		if part.Type == aisdk.ContentPartTypeText {
+			text += part.Text
+		}
+	}
+	if text == "" {
+		t.Error("Generate returned no text content after recovering from the simulated 429")
+	}
+}
+
+func TestModel_Generate_MapsRetryAfterHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(fakeRateLimitErrorBody))
+	}))
+	t.Cleanup(server.Close)
+
+	// option.WithMaxRetries(0) disables the real openai-go client's own
+	// built-in retry (default: 2 automatic retries) for this one test — same
+	// rationale as the identical line in Anthropic's Task 2 test: without
+	// it, the SDK's own retry loop also honors this fake server's
+	// Retry-After: 30 header, making the test sleep ~30s per retry (~60s+
+	// total) for a reason unrelated to what's being tested here. This was
+	// discovered and fixed during Task 2's implementation — written into
+	// this task's spec from the start rather than needing the same fix twice.
+	provider := openaiprovider.New("test-api-key", option.WithBaseURL(server.URL), option.WithMaxRetries(0))
+	model := provider.Model("gpt-4o")
+
+	_, err := model.Generate(context.Background(), aisdk.GenerateRequest{
+		Messages: []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("hi")}}},
+	})
+
+	var aisdkErr *aisdk.Error
+	if !errors.As(err, &aisdkErr) {
+		t.Fatalf("Generate error = %v, want it to unwrap to *aisdk.Error", err)
+	}
+	if aisdkErr.RetryAfter != 30*time.Second {
+		t.Errorf("aisdkErr.RetryAfter = %v, want 30s", aisdkErr.RetryAfter)
+	}
+}
+
+func TestModel_ImplementsModelInfo(t *testing.T) {
+	provider := openaiprovider.New("test-api-key")
+	model := provider.Model("gpt-4o")
+
+	mi, ok := model.(aisdk.ModelInfo)
+	if !ok {
+		t.Fatal("model does not implement aisdk.ModelInfo")
+	}
+	if mi.Provider() != "openai" {
+		t.Errorf("mi.Provider() = %q, want %q", mi.Provider(), "openai")
+	}
+	if mi.ModelName() != "gpt-4o" {
+		t.Errorf("mi.ModelName() = %q, want %q", mi.ModelName(), "gpt-4o")
+	}
+}

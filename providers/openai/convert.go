@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	openaisdk "github.com/openai/openai-go/v2"
 	"github.com/openai/openai-go/v2/packages/param"
 	"github.com/habibiramadhan-dev/aisdk-go"
+	"github.com/habibiramadhan-dev/aisdk-go/internal/httpretry"
 )
 
 func toChatCompletionParams(modelName string, req aisdk.GenerateRequest) openaisdk.ChatCompletionNewParams {
@@ -207,10 +209,22 @@ func mapError(err error) error {
 		code, retryable = aisdk.ErrorCodeOverloaded, true
 	}
 
+	// apiErr.Response is read for its header before Cause is built from the
+	// sanitized apiErr.Error() string below — reading .Response.Header here
+	// does not reintroduce the leak errors.New(apiErr.Error()) exists to
+	// prevent, since only the specific Retry-After value is extracted, never
+	// the full request/response object itself. apiErr.Response can
+	// theoretically be nil (per SDK doc comments), hence the guard.
+	var retryAfter time.Duration
+	if apiErr.Response != nil {
+		retryAfter, _ = httpretry.ParseRetryAfter(apiErr.Response.Header)
+	}
+
 	return &aisdk.Error{
-		Provider:  "openai",
-		Code:      code,
-		Retryable: retryable,
-		Cause:     errors.New(apiErr.Error()),
+		Provider:   "openai",
+		Code:       code,
+		Retryable:  retryable,
+		RetryAfter: retryAfter,
+		Cause:      errors.New(apiErr.Error()),
 	}
 }

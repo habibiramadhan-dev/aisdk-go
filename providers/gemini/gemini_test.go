@@ -699,6 +699,54 @@ func TestModel_Stream_EmitsToolCallDeltas(t *testing.T) {
 	}
 }
 
+// TestGeminiModel_FallbackRecoversFromTransientError proves design.md §10
+// Fase 6's exit criterion against a real genai-backed Model wrapped in a
+// real aisdk.Fallback: a simulated 429 outage on the first request is
+// retried (per Fallback's own retry/backoff policy) and recovers on the
+// second. No option.WithMaxRetries(0)-equivalent is needed here — Gemini's
+// SDK has no built-in retry behavior for generation calls (confirmed in
+// this project's Fase 6 research), so Fallback's retry logic is the only
+// retry mechanism in play.
+func TestGeminiModel_FallbackRecoversFromTransientError(t *testing.T) {
+	var attempt int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		w.Header().Set("Content-Type", "application/json")
+		if attempt == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(fakeRateLimitErrorBody))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fakeSuccessResponse))
+	}))
+	t.Cleanup(server.Close)
+
+	provider := newTestProvider(t, server)
+	model := aisdk.Fallback([]aisdk.Model{provider.Model("gemini-2.0-flash")}, aisdk.WithMaxRetries(2), aisdk.WithBackoff(func(attempt int) time.Duration { return time.Millisecond }))
+
+	resp, err := model.Generate(context.Background(), aisdk.GenerateRequest{
+		Messages:  []aisdk.Message{{Role: aisdk.RoleUser, Parts: []aisdk.ContentPart{aisdk.TextPart("hi")}}},
+		MaxTokens: 64,
+	})
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	if attempt != 2 {
+		t.Errorf("server saw %d requests, want 2 (1 failed + 1 recovered)", attempt)
+	}
+
+	var text string
+	for _, part := range resp.Message.Parts {
+		if part.Type == aisdk.ContentPartTypeText {
+			text += part.Text
+		}
+	}
+	if text == "" {
+		t.Error("Generate returned no text content after recovering from the simulated 429")
+	}
+}
+
 func TestModel_Generate_SendsResponseSchemaAsResponseJsonSchema(t *testing.T) {
 	var capturedBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -738,5 +786,24 @@ func TestModel_Generate_SendsResponseSchemaAsResponseJsonSchema(t *testing.T) {
 	}
 	if _, ok := schema["properties"].(map[string]any)["city"]; !ok {
 		t.Errorf("responseJsonSchema.properties = %+v, want a %q key", schema["properties"], "city")
+	}
+}
+
+func TestModel_ImplementsModelInfo(t *testing.T) {
+	provider, err := geminiprovider.New(context.Background(), "test-api-key")
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	model := provider.Model("gemini-2.0-flash")
+
+	mi, ok := model.(aisdk.ModelInfo)
+	if !ok {
+		t.Fatal("model does not implement aisdk.ModelInfo")
+	}
+	if mi.Provider() != "gemini" {
+		t.Errorf("mi.Provider() = %q, want %q", mi.Provider(), "gemini")
+	}
+	if mi.ModelName() != "gemini-2.0-flash" {
+		t.Errorf("mi.ModelName() = %q, want %q", mi.ModelName(), "gemini-2.0-flash")
 	}
 }

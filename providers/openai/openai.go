@@ -31,6 +31,12 @@ type model struct {
 	modelName string
 }
 
+// Provider implements aisdk.ModelInfo.
+func (m *model) Provider() string { return "openai" }
+
+// ModelName implements aisdk.ModelInfo.
+func (m *model) ModelName() string { return m.modelName }
+
 func (m *model) Generate(ctx context.Context, req aisdk.GenerateRequest) (aisdk.GenerateResponse, error) {
 	params := toChatCompletionParams(m.modelName, req)
 

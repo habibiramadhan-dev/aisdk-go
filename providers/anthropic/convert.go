@@ -4,9 +4,11 @@ package anthropic
 import (
 	"encoding/json"
 	"errors"
+	"time"
 
 	anthropicsdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/habibiramadhan-dev/aisdk-go"
+	"github.com/habibiramadhan-dev/aisdk-go/internal/httpretry"
 )
 
 func toMessageNewParams(modelName string, req aisdk.GenerateRequest) anthropicsdk.MessageNewParams {
@@ -175,12 +177,22 @@ func mapError(err error) error {
 		code, retryable = aisdk.ErrorCodePermissionDenied, false
 	}
 
+	// Reading .Response.Header here doesn't reintroduce the leak
+	// errors.New(apiErr.Error()) below exists to prevent — only the specific
+	// Retry-After value is extracted, never the full request/response object
+	// (which is what would carry the Authorization header).
+	var retryAfter time.Duration
+	if apiErr.Response != nil {
+		retryAfter, _ = httpretry.ParseRetryAfter(apiErr.Response.Header)
+	}
+
 	return &aisdk.Error{
-		Provider:  "anthropic",
-		Code:      code,
-		Retryable: retryable,
-		RequestID: apiErr.RequestID,
-		Cause:     errors.New(apiErr.Error()),
+		Provider:   "anthropic",
+		Code:       code,
+		Retryable:  retryable,
+		RequestID:  apiErr.RequestID,
+		RetryAfter: retryAfter,
+		Cause:      errors.New(apiErr.Error()),
 	}
 }
 

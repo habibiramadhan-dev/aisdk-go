@@ -1,6 +1,9 @@
 package aisdk
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // ErrorCode classifies an Error independent of which provider produced it.
 type ErrorCode string
@@ -24,7 +27,13 @@ type Error struct {
 	Code      ErrorCode
 	Retryable bool
 	RequestID string
-	Cause     error
+	// RetryAfter is the provider's requested wait time before retrying, parsed
+	// from a Retry-After response header when present. Zero means the
+	// provider didn't supply one (or, for Gemini, that its SDK's error type
+	// structurally has no access to response headers at all — an honest gap,
+	// not a bug; see providers/gemini's mapError, which never sets this).
+	RetryAfter time.Duration
+	Cause      error
 }
 
 func (e *Error) Error() string {
