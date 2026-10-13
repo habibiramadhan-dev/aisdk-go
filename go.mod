@@ -3,7 +3,7 @@ module github.com/habibiramadhan-dev/aisdk-go
 go 1.26.5
 
 require (
-	github.com/anthropics/anthropic-sdk-go v1.58.0
+	github.com/anthropics/anthropic-sdk-go v1.80.0
 	github.com/invopop/jsonschema v0.14.0
 	github.com/openai/openai-go/v2 v2.7.1
 	go.opentelemetry.io/otel v1.44.0
